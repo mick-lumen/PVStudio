@@ -142,4 +142,55 @@ describe('panel render layout', () => {
     const overTilt = { ...placement('tilt'), tiltDeg: 91 }
     expect(buildPanelRenderItems({ placements: [malformed, overTilt], panelDefinitions: [panel], surfaces: [surface] })).toEqual([])
   })
+
+  it('threads selected surface edge metadata into placed and preview poses', () => {
+    const edge = { surfaceId: surface.id, type: 'gutter' as const, direction: { x: -1, y: 0 } }
+    const items = buildPanelRenderItems({
+      placements: [placement('placed')],
+      panelDefinitions: [panel],
+      surfaces: [surface],
+      surfaceEdges: [edge],
+      autoFillPreview: preview,
+    })
+    expect(items.find((item) => item.id === 'placed')?.pose.tangentX).toEqual([1, 0, 0])
+    expect(items.find((item) => item.id === 'candidate')?.pose.tangentX).toEqual([1, 0, 0])
+    expect(items.find((item) => item.id === 'placed')?.pose.tangentY).toEqual([0, 1, 0])
+    expect(items.find((item) => item.id === 'candidate')?.pose.tangentY).toEqual([0, 1, 0])
+
+    const requestEdgePreview: AutoFillPreview = {
+      ...preview,
+      request: { ...preview.request, edge: { type: 'gutter', direction: { x: 1, y: 0 } } },
+    }
+    const requestItems = buildPanelRenderItems({
+      panelDefinitions: [panel],
+      surfaces: [surface],
+      surfaceEdges: [edge],
+      autoFillPreview: requestEdgePreview,
+    })
+    expect(requestItems[0]?.pose.tangentX).toEqual([1, 0, 0])
+    expect(requestItems[0]?.pose.tangentY).toEqual([0, 1, 0])
+  })
+
+  it('lets an explicit null edge override suppress an embedded surface edge', () => {
+    const embeddedSurface: SurfaceDescriptor = {
+      ...surface,
+      edge: { type: 'gutter', direction: { x: 0, y: 1 } },
+    }
+    const fallbackItems = buildPanelRenderItems({
+      placements: [placement('embedded')],
+      panelDefinitions: [panel],
+      surfaces: [embeddedSurface],
+    })
+    expect(fallbackItems[0]?.pose.tangentX).toEqual([0, -1, 0])
+    expect(fallbackItems[0]?.pose.tangentY).toEqual([1, 0, 0])
+
+    const clearedItems = buildPanelRenderItems({
+      placements: [placement('cleared')],
+      panelDefinitions: [panel],
+      surfaces: [embeddedSurface],
+      surfaceEdges: { [surface.id]: null },
+    })
+    expect(clearedItems[0]?.pose.tangentX).toEqual([1, 0, 0])
+    expect(clearedItems[0]?.pose.tangentY).toEqual([0, 1, 0])
+  })
 })

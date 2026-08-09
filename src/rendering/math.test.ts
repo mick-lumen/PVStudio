@@ -92,6 +92,52 @@ describe('panel rendering pose math', () => {
     expect(dot(cross(pose.tangentX, pose.tangentY), pose.normal)).toBeCloseTo(1)
   })
 
+  it('derives panel axes from forward/reverse gutter direction and ridge-facing side', () => {
+    const forward = computePanelPose(panel, surface, placement(), { type: 'gutter', direction: { x: 1, y: 0 } })
+    const reverse = computePanelPose(panel, surface, placement(), { type: 'gutter', direction: { x: -1, y: 0 } })
+    expect(forward.tangentX).toEqual([1, 0, 0])
+    expect(forward.tangentY).toEqual([0, 1, 0])
+    expect(reverse.tangentX).toEqual(forward.tangentX)
+    expect(reverse.tangentY).toEqual(forward.tangentY)
+    expect(reverse.surfaceAnchor).toEqual(forward.surfaceAnchor)
+    expect(dot(cross(reverse.tangentX, reverse.tangentY), reverse.normal)).toBeCloseTo(1)
+    const ridge = computePanelPose(panel, surface, placement({ tiltDeg: 0 }), {
+      type: 'ridge',
+      direction: { x: 1, y: 0 },
+      line: { origin: { x: 0, y: 30 }, direction: { x: 1, y: 0 } },
+    })
+    expect(ridge.tangentY[0]).toBeCloseTo(0)
+    expect(ridge.tangentY[1]).toBeCloseTo(-1)
+    expect(ridge.tangentY[2]).toBeCloseTo(0)
+    const reversedRidge = computePanelPose(panel, surface, placement({ tiltDeg: 0 }), {
+      type: 'ridge',
+      direction: { x: -1, y: 0 },
+      line: { origin: { x: 0, y: 30 }, direction: { x: 1, y: 0 } },
+    })
+    expect(reversedRidge.tangentX).toEqual(ridge.tangentX)
+    expect(reversedRidge.tangentY).toEqual(ridge.tangentY)
+    expect(dot(cross(ridge.tangentX, ridge.tangentY), ridge.normal)).toBeCloseTo(1)
+  })
+
+  it('keeps a sloped pose right-handed and invariant under reversed gutter traversal', () => {
+    const slopedSurface: SurfaceDescriptor = {
+      ...surface,
+      frame: {
+        origin: surface.frame.origin,
+        normal: { x: 0, y: 0.6, z: 0.8 },
+        tangentX: { x: 1, y: 0, z: 0 },
+        tangentY: { x: 0, y: 0.8, z: -0.6 },
+      },
+    }
+    const forward = computePanelPose(panel, slopedSurface, placement(), { type: 'gutter', direction: { x: 1, y: 0 } })
+    const reverse = computePanelPose(panel, slopedSurface, placement(), { type: 'gutter', direction: { x: -1, y: 0 } })
+    expect(reverse.tangentX).toEqual(forward.tangentX)
+    expect(reverse.tangentY).toEqual(forward.tangentY)
+    expect(reverse.normal).toEqual(forward.normal)
+    expect(reverse.matrix).toEqual(forward.matrix)
+    expect(dot(cross(forward.tangentX, forward.tangentY), forward.normal)).toBeCloseTo(1)
+  })
+
   it('provides a finite normal fallback for zero vectors', () => {
     expect(normalise([0, 0, 0])).toEqual([0, 0, 1])
   })

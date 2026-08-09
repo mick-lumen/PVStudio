@@ -4,10 +4,12 @@ import type {
   PanelGroupSettings,
   RectangularObstacle,
   SurfaceDescriptor,
+  SurfaceEdgeMetadata,
 } from '../core'
 import {
   createPlacementStore,
   dispatchPlacementAction,
+  editableGroupIdFor,
   initialPlacementState,
   placementReducer,
 } from './state'
@@ -105,6 +107,25 @@ describe('PlacementStore manual placement and selection', () => {
     expect(store.clickSelect(second?.id ?? '', true, true)).toEqual([first?.id])
     expect(store.selectByBox({ x: 1.4, y: 0.8, width: 1.2, height: 2.4 }, 'roof')).toEqual([first?.id])
     expect(store.selectByBox({ x: 1.4, y: 0.8, width: 1.2, height: 2.4 }, 'garage')).toEqual([])
+  })
+
+  it('selects panels intersecting a perspective-correct surface polygon', () => {
+    const store = makeStore()
+    const first = store.addPanel({ panelId: panel.id, surfaceId: 'roof', localCenter: { x: 2, y: 2 } })
+    const second = store.addPanel({ panelId: panel.id, surfaceId: 'roof', localCenter: { x: 5, y: 2 } })
+    expect(first).toBeDefined()
+    expect(second).toBeDefined()
+    // A projected drag rectangle is generally a convex quadrilateral in the
+    // surface frame, not an axis-aligned rectangle. This polygon intersects
+    // only the first panel's footprint.
+    expect(store.selectByPolygon([
+      { x: 1.2, y: 0.5 },
+      { x: 2.8, y: 0.8 },
+      { x: 2.7, y: 3.4 },
+      { x: 1.1, y: 3.1 },
+    ], 'roof')).toEqual([first?.id])
+    expect(store.selectByPolygon(null, 'roof')).toEqual([first?.id])
+    expect(store.selectByPolygon([{ x: 0, y: 0 }, { x: 1, y: 1 }], 'roof')).toEqual([first?.id])
   })
 
   it('moves a selected group without allowing collisions or non-finite deltas', () => {
@@ -296,6 +317,48 @@ describe('PlacementStore settings, surfaces, arrays and alignment', () => {
     expect(store.commitArrayDrag()).toEqual([])
   })
 
+  it('assigns deterministic group ids to generated arrays and derives a single editable group', () => {
+    const store = makeStore()
+    store.setActiveSurface('roof')
+    expect(store.beginArrayDrag(panel.id, undefined, { x: 1, y: 1 })).toBe(true)
+    expect(store.updateArrayDrag({ x: 6, y: 4 })).toBe(true)
+    const created = store.commitArrayDrag()
+    expect(created).toHaveLength(4)
+    expect(new Set(created.map((placement) => placement.groupId))).toEqual(new Set(['group-1']))
+    expect(editableGroupIdFor(store.getState())).toBe('group-1')
+
+    store.selectPanels([created[0]?.id ?? '', created[1]?.id ?? ''])
+    expect(editableGroupIdFor(store.getState())).toBe('group-1')
+    expect(store.selectPanels([created[0]?.id ?? '', created[1]?.id ?? '', 'missing'])).toEqual([created[0]?.id, created[1]?.id])
+    expect(editableGroupIdFor(store.getState())).toBe('group-1')
+    const other = store.addPanel({ panelId: panel.id, surfaceId: 'roof', localCenter: { x: 7.8, y: 2.2 }, groupId: 'group-2' })
+    expect(other).toBeDefined()
+    store.selectPanels([created[0]?.id ?? '', other?.id ?? ''])
+    expect(editableGroupIdFor(store.getState())).toBeUndefined()
+    store.selectPanels([])
+    expect(editableGroupIdFor(store.getState())).toBeUndefined()
+  })
+
+  it('uses group settings when explicit auto-fill fields are supplied', () => {
+    const groupSettings: PanelGroupSettings = { ...settings, interPanelSpacingM: 0.8, rowSpacingM: 0.6 }
+    const store = createPlacementStore({ panels: [panel], surfaces: [surface], settings, groupSettings: { 'group-a': groupSettings } })
+    const preview = store.previewAutoFill({
+      panelId: panel.id,
+      surfaceId: surface.id,
+      region: { x: 0, y: 0, width: 5, height: 5 },
+      obstacles: [],
+      settings: { orientation: 'landscape' },
+      groupId: 'group-a',
+    })
+    expect(preview).toBeDefined()
+    expect(preview?.request.settings).toMatchObject({
+      orientation: 'landscape',
+      interPanelSpacingM: groupSettings.interPanelSpacingM,
+      rowSpacingM: groupSettings.rowSpacingM,
+    })
+    expect(preview?.candidates.every((candidate) => candidate.groupId === 'group-a')).toBe(true)
+  })
+
   it('aligns selected panels from an anchor and honours alignment mode', () => {
     const store = makeStore()
     const anchor = store.addPanel({ panelId: panel.id, surfaceId: 'roof', localCenter: { x: 2, y: 2 } })
@@ -336,6 +399,20 @@ describe('PlacementStore auto-fill, history and selectors', () => {
     expect(store.previewAutoFill({ panelId: panel.id, surfaceId: 'roof' })).toBeDefined()
     expect(store.cancelAutoFill()).toBe(true)
     expect(store.getState().autoFillPreview).toBeUndefined()
+  })
+
+  it('keeps legacy auto-fill payloads valid while grouping the confirmed batch', () => {
+    const store = makeStore()
+    const globalBefore = store.getState().settings
+    const preview = store.previewAutoFill({ panelId: panel.id, surfaceId: 'roof' })
+    expect(preview?.request.groupId).toBe('group-1')
+    expect(preview?.candidates.length).toBeGreaterThan(0)
+    expect(preview?.candidates.every((candidate) => candidate.groupId === 'group-1')).toBe(true)
+
+    const confirmed = store.confirmAutoFill()
+    expect(confirmed.length).toBeGreaterThan(0)
+    expect(new Set(confirmed.map((placement) => placement.groupId))).toEqual(new Set(['group-1']))
+    expect(store.getState().settings).toEqual(globalBefore)
   })
 
   it('confirms more than 400 auto-fill candidates within the interaction budget', () => {
@@ -454,6 +531,123 @@ describe('PlacementStore auto-fill, history and selectors', () => {
     const exposed = store.getGroupSettings('array-a') as unknown as { interPanelSpacingM: number }
     expect(() => { exposed.interPanelSpacingM = 0 }).toThrow()
     expect(store.getGroupSettings('array-a').interPanelSpacingM).toBe(0.45)
+  })
+
+  it('clears optional auto-fill settings and restores them through undo and redo', () => {
+    const store = makeStore()
+    const optional = { modulesPerRow: 8, rowOffsetM: 0.35, obstacleClearanceM: 0.2 }
+    expect(store.setSettings(optional)).toBe(true)
+    expect(store.getState().settings).toMatchObject(optional)
+
+    expect(store.setSettings({
+      modulesPerRow: undefined,
+      rowOffsetM: undefined,
+      obstacleClearanceM: undefined,
+    })).toBe(true)
+    expect(store.getState().settings).not.toHaveProperty('modulesPerRow')
+    expect(store.getState().settings).not.toHaveProperty('rowOffsetM')
+    expect(store.getState().settings).not.toHaveProperty('obstacleClearanceM')
+
+    expect(store.undo()).toBe(true)
+    expect(store.getState().settings).toMatchObject(optional)
+    expect(store.redo()).toBe(true)
+    expect(store.getState().settings).not.toHaveProperty('modulesPerRow')
+    expect(store.getState().settings).not.toHaveProperty('rowOffsetM')
+    expect(store.getState().settings).not.toHaveProperty('obstacleClearanceM')
+
+    const groupOptional = { modulesPerRow: 6, rowOffsetM: 0.25, obstacleClearanceM: 0.1 }
+    expect(store.setGroupSettings('array-a', groupOptional)).toBe(true)
+    expect(store.getGroupSettings('array-a')).toMatchObject(groupOptional)
+    expect(store.setGroupSettings('array-a', {
+      modulesPerRow: undefined,
+      rowOffsetM: undefined,
+      obstacleClearanceM: undefined,
+    })).toBe(true)
+    const clearedGroup = store.getGroupSettings('array-a')
+    expect(clearedGroup).not.toHaveProperty('modulesPerRow')
+    expect(clearedGroup).not.toHaveProperty('rowOffsetM')
+    expect(clearedGroup).not.toHaveProperty('obstacleClearanceM')
+
+    expect(store.undo()).toBe(true)
+    expect(store.getGroupSettings('array-a')).toMatchObject(groupOptional)
+    expect(store.redo()).toBe(true)
+    const redoneGroup = store.getGroupSettings('array-a')
+    expect(redoneGroup).not.toHaveProperty('modulesPerRow')
+    expect(redoneGroup).not.toHaveProperty('rowOffsetM')
+    expect(redoneGroup).not.toHaveProperty('obstacleClearanceM')
+  })
+
+  it('keeps orientation edits scoped to a selected group without leaking into global defaults', () => {
+    const store = makeStore()
+    const first = store.addPanel({ panelId: panel.id, surfaceId: 'roof', localCenter: { x: 2, y: 2 }, groupId: 'array-a', id: 'array-a-1' })
+    const second = store.addPanel({ panelId: panel.id, surfaceId: 'roof', localCenter: { x: 5, y: 2 }, groupId: 'array-a', id: 'array-a-2' })
+    expect(first).toBeDefined()
+    expect(second).toBeDefined()
+    store.selectPanels([first?.id ?? '', second?.id ?? ''])
+    expect(store.setOrientation('landscape')).toBe(true)
+    expect(store.getState().settings.orientation).toBe('portrait')
+    expect(store.getGroupSettings('array-a').orientation).toBe('landscape')
+    expect(store.getState().placements['array-a-1']?.orientation).toBe('landscape')
+    expect(store.getState().placements['array-a-2']?.orientation).toBe('landscape')
+
+    expect(store.undo()).toBe(true)
+    expect(store.getState().settings.orientation).toBe('portrait')
+    expect(store.getState().groupSettings['array-a']).toBeUndefined()
+    expect(store.getState().placements['array-a-1']?.orientation).toBe('portrait')
+
+    const ungrouped = makeStore()
+    const ungroupedPanel = ungrouped.addPanel({ panelId: panel.id, surfaceId: 'roof', localCenter: { x: 2, y: 2 }, id: 'ungrouped' })
+    expect(ungroupedPanel).toBeDefined()
+    expect(ungrouped.setOrientation('landscape')).toBe(true)
+    expect(ungrouped.getState().settings.orientation).toBe('landscape')
+  })
+
+  it('exposes typed surface edges, updates autofill orientation, and keeps edge edits out of undo history', () => {
+    const store = makeStore()
+    const legacyEdge = { surfaceId: 'roof', direction: { x: 4, y: 0 } }
+    const legacy = createPlacementStore({ panels: [panel], surfaces: [surface], gutters: [legacyEdge] })
+    expect(legacy.getSurfaceEdge('roof')).toMatchObject({ type: 'gutter', direction: { x: 1, y: 0 } })
+    expect(legacy.surfaceEdgeSummary('roof')?.path).toBe('Surface roof › Gutter')
+
+    const beforeDepth = store.getState().undoDepth
+    const edge: SurfaceEdgeMetadata = {
+      type: 'gutter',
+      direction: { x: -1, y: 0 },
+      line: { origin: { x: 0, y: 0 }, direction: { x: 0, y: 1 } },
+    }
+    expect(dispatchPlacementAction(store, { type: 'set-surface-edge', surfaceId: 'roof', edge })).toBe(true)
+    expect(store.getState().undoDepth).toBe(beforeDepth)
+    expect(store.getSurfaceEdge('roof')).toEqual({ surfaceId: 'roof', ...edge })
+    expect(store.surfaceEdgeSummary('roof')).toMatchObject({ path: 'Surface roof › Gutter', type: 'gutter' })
+    const preview = store.previewAutoFill({ panelId: panel.id, surfaceId: 'roof', region: surface.region, settings })
+    expect(preview?.request.edge?.direction).toEqual({ x: -1, y: 0 })
+    expect(preview?.request.edge?.line?.direction).toEqual({ x: 0, y: 1 })
+    expect(store.setSurfaceEdge('roof', { ...edge, type: 'ridge', direction: { x: 1, y: 0 } })).toBe(true)
+    const ridgePreview = store.previewAutoFill({ panelId: panel.id, surfaceId: 'roof', region: surface.region, settings })
+    expect(ridgePreview?.request.edge).toMatchObject({ type: 'ridge', direction: { x: 1, y: 0 } })
+    expect(store.undo()).toBe(false)
+    expect(store.getSurfaceEdge('roof')?.type).toBe('ridge')
+    expect(store.setSurfaceEdge('roof', undefined)).toBe(true)
+    expect(store.getSurfaceEdge('roof')).toBeUndefined()
+    expect(store.previewAutoFill({ panelId: panel.id, surfaceId: 'roof', region: surface.region, settings })?.request.edge).toBeUndefined()
+  })
+
+  it('keeps an explicit edge-clear tombstone ahead of embedded surface metadata', () => {
+    const embeddedSurface: SurfaceDescriptor = {
+      ...surface,
+      edge: { type: 'gutter', direction: { x: 1, y: 0 } },
+    }
+    const store = createPlacementStore({ panels: [panel], surfaces: [embeddedSurface] })
+    expect(store.getSurfaceEdge('roof')).toMatchObject({ type: 'gutter', direction: { x: 1, y: 0 } })
+    expect(store.setSurfaceEdge('roof', undefined)).toBe(true)
+    expect(store.getSurfaceEdge('roof')).toBeUndefined()
+    expect(store.previewAutoFill({ panelId: panel.id, surfaceId: 'roof', region: embeddedSurface.region, settings })?.request.edge).toBeUndefined()
+
+    // The tombstone is part of the serialisable context and survives a
+    // context round-trip, so embedded metadata cannot reappear on reload.
+    const rehydrated = createPlacementStore(store.context)
+    expect(rehydrated.getSurfaceEdge('roof')).toBeUndefined()
+    expect(rehydrated.previewAutoFill({ panelId: panel.id, surfaceId: 'roof', region: embeddedSurface.region, settings })?.request.edge).toBeUndefined()
   })
 
   it('does not record transient interaction state in undo history', () => {

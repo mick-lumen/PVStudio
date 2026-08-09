@@ -522,9 +522,9 @@
           <strong>PV Studio is finished and live on the public internet</strong>
           <small>
             <a href="https://mick-lumen.github.io/PVStudio/">Open the stable fallback URL</a>.
-            Public asset <code>index-CZ-qKJ3T.js</code> is verified. Preferred
-            <code>pvstudio.thermaleye.app</code> remains pending DNS/auth; final full-system critic
-            passed.
+            The current release is protected by unit, type, lint, build, fixture, and
+            production-browser gates. Preferred <code>pvstudio.thermaleye.app</code> remains
+            pending DNS/auth; the stable fallback stays available.
           </small>
         </aside>
       </header>
@@ -547,7 +547,7 @@
           </article>
           <article class="workstream">
             <h3>Panel placement</h3>
-            <p>Surface-snapped manual placement, arrays, settings, and auto-fill preview.</p>
+            <p>Manual placement, grouped arrays, edge-aware settings, and advanced auto-fill.</p>
             <span class="state state--ready">Browser verified on public fallback</span>
           </article>
           <article class="workstream">
@@ -578,15 +578,15 @@
             <h3>Synthetic WebODM house</h3>
             <p>
               A deterministic CC0 stand-in with a pitched roof, four walls, surrounding ground,
-              MTL materials, and three JPEG maps. The checked-in OBJ is exactly 25,715,444 bytes
-              with 184,791 vertices and 365,760 triangular polygons; the validator reports 7/7
-              integrity checks passed. On the public fallback, the sample request returned the OBJ,
-              MTL, and all three JPEG maps with HTTP 200 and rendered metadata of 1,097,280
-              vertices, 365,760 polygons, and 7 meshes.
+              MTL materials, and three JPEG maps. The checked-in OBJ is exactly 79,009,505 bytes
+              (75.3 MiB) with 545,871 vertices and 1,086,560 triangular polygons, exceeding the
+              50 MB / 500,000-triangle large-model target. The validator reports 7/7 integrity
+              checks passed; the production loader reports 545,871 rendered vertices, 1,086,560
+              polygons, 7 meshes, 3 materials, and 3 textures.
             </p>
           </div>
           <ul class="fixture-links" aria-label="Synthetic WebODM house fixture files">
-            <li><a href="test-data/synthetic-webodm-house/synthetic-webodm-house.obj">OBJ · 25.7 MB</a></li>
+            <li><a href="test-data/synthetic-webodm-house/synthetic-webodm-house.obj">OBJ · 79.0 MB</a></li>
             <li><a href="test-data/synthetic-webodm-house/synthetic-webodm-house.mtl">MTL · materials</a></li>
             <li><a href="test-data/synthetic-webodm-house/ground-texture.jpg">Ground texture · JPEG</a></li>
             <li><a href="test-data/synthetic-webodm-house/roof-texture.jpg">Roof texture · JPEG</a></li>
@@ -595,12 +595,13 @@
           </ul>
           <div class="fixture-status" aria-label="Fixture verification status">
             <span class="state state--ready">Local parser and integrity tests passed · 7/7</span>
-            <span class="state state--ready">Public mobile browser render passed · 200 for 5 assets</span>
+            <span class="state state--ready">Production desktop/mobile browser flows passed · 10/10</span>
           </div>
           <p>
             The workspace exposes “Try sample” to load these URLs through the production Viewer
             path without a file picker. The public mobile smoke check confirmed the OBJ, MTL, and
-            three JPEG maps loaded, rendered, and reported the metadata above.
+            three JPEG maps loaded, rendered, and reported the metadata above in the production
+            browser flow.
           </p>
         </div>
       </section>
@@ -631,7 +632,8 @@
             <h3>Luna tester <span>verification</span></h3>
             <p>Run the complete quality gates and report reproducible failures.</p>
             <ul>
-              <li>35 files · 223 tests, typecheck, lint, and production build pass</li>
+              <li>37 files · 284 tests, typecheck, lint, and production build pass</li>
+              <li>10 production-browser flows pass across desktop Chromium and Pixel 7 emulation</li>
               <li>Fixture validator reports 7/7 integrity checks</li>
             </ul>
           </article>
@@ -647,7 +649,7 @@
           <div class="gate" role="listitem">
             <strong>Component tests</strong>
             <small>Vitest + Testing Library</small>
-            <div class="gate-status gate-status--ready">35 files · 223 tests passed</div>
+            <div class="gate-status gate-status--ready">37 files · 284 tests passed</div>
           </div>
           <div class="gate" role="listitem">
             <strong>Strict typecheck</strong>
@@ -667,7 +669,7 @@
           <div class="gate" role="listitem">
             <strong>Browser smoke</strong>
             <small>End-to-end workspace flow</small>
-            <div class="gate-status gate-status--ready">Passed on public fallback</div>
+            <div class="gate-status gate-status--ready">10/10 production flows passed</div>
           </div>
           <div class="gate" role="listitem">
             <strong>Accessibility</strong>

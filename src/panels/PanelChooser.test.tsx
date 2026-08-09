@@ -20,6 +20,15 @@ describe('PanelChooser', () => {
     })
   })
 
+  it('disables add when the host does not provide an add callback and explains why', () => {
+    render(<PanelChooser panels={panels} />)
+
+    const addButton = screen.getByRole('button', { name: '+ Panel' })
+    expect(addButton).toBeDisabled()
+    expect(addButton).toHaveAttribute('aria-describedby', 'panel-add-disabled-reason')
+    expect(screen.getByText('Adding panels is unavailable in this context.')).toHaveAttribute('id', 'panel-add-disabled-reason')
+  })
+
   it('searches by code, clears the selected model, and emits null', async () => {
     const user = userEvent.setup()
     const onPanelSelect = vi.fn<(panel: PanelSpec | null) => void>()

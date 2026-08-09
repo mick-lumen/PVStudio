@@ -1,0 +1,24 @@
+.pv-viewer__canvas {
+  touch-action: none;
+}
+
+.pv-viewer__canvas canvas {
+  touch-action: none !important;
+}
+
+.viewer-control-button {
+  min-width: 44px;
+  min-height: 32px;
+}
+
+@media (max-width: 600px) {
+  .viewer-control-button {
+    min-height: 44px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .viewer-control-button {
+    transition: none;
+  }
+}

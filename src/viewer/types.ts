@@ -1,5 +1,5 @@
 import type { CSSProperties, ReactNode } from 'react'
-import type { Point3, SurfaceDescriptor, SurfaceSelection } from '../core'
+import type { Point2, Point3, SurfaceDescriptor, SurfaceSelection } from '../core'
 
 /**
  * Kept as a compatibility alias for callers that imported the viewer's old
@@ -41,11 +41,26 @@ export interface ViewerBoundingBox {
   readonly size: Point3
 }
 
+/** Parser-owned source measurements retained alongside built geometry. */
+export interface ViewerSourceMetadata {
+  readonly vertexCount: number
+  readonly polygonCount: number
+  readonly bounds: ViewerBoundingBox
+  /** Bounds of positions referenced by triangulated faces. */
+  readonly renderedBounds?: ViewerBoundingBox
+}
+
 /** Measurements collected after a model has been parsed. */
 export interface ViewerModelMetadata {
   readonly name: string
   readonly vertexCount: number
   readonly polygonCount: number
+  /** Source OBJ vertices before any position/UV/normal tuple expansion. */
+  readonly sourceVertexCount?: number
+  /** Source triangles after OBJ polygon fan triangulation. */
+  readonly sourcePolygonCount?: number
+  /** Bounds collected from source `v` records before geometry construction. */
+  readonly sourceBounds?: ViewerBoundingBox
   readonly meshCount: number
   readonly materialCount: number
   readonly textureCount: number
@@ -81,6 +96,12 @@ export interface ViewerSurfaceSelectEvent {
 /** Pointer gesture phase delivered with a plain, renderer-independent hit. */
 export type ViewerSurfacePointerPhase = 'move' | 'down' | 'up' | 'cancel'
 
+/** Perspective-correct local polygon produced by a native screen drag. */
+export interface ViewerSurfacePointerBox {
+  readonly surfaceId: string
+  readonly corners: readonly Point2[]
+}
+
 /**
  * Surface pointer interaction for placement tools. `selection` is null when
  * the pointer is over non-selectable scene content; otherwise it contains the
@@ -89,6 +110,8 @@ export type ViewerSurfacePointerPhase = 'move' | 'down' | 'up' | 'cancel'
 export interface ViewerSurfacePointerEvent {
   readonly phase: ViewerSurfacePointerPhase
   readonly pointerId: number
+  /** Native pointer kind, when supplied by the browser (mouse, pen, touch). */
+  readonly pointerType?: string
   readonly button: number
   readonly buttons: number
   readonly shiftKey: boolean
@@ -96,6 +119,8 @@ export interface ViewerSurfacePointerEvent {
   readonly ctrlKey: boolean
   readonly metaKey: boolean
   readonly selection: ViewerSurfaceSelection | null
+  /** Present on native select-box pointerup events. */
+  readonly surfaceBox?: ViewerSurfacePointerBox
 }
 
 export interface ViewerProps {
@@ -129,4 +154,6 @@ export interface ViewerProps {
   readonly onSurfacePointer?: (event: ViewerSurfacePointerEvent) => void
   /** Surface tool context used to arbitrate camera navigation vs placement gestures. */
   readonly surfaceInteractionMode?: ViewerSurfaceInteractionMode
+  /** True while the app owns an active surface-box selection gesture. */
+  readonly surfaceGestureActive?: boolean
 }

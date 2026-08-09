@@ -557,6 +557,27 @@ html[data-theme='dark'] .panel-chooser,
   }
 }
 
+/* Keep the compact desktop layout while giving phone-sized controls a reliable
+   44px activation area, including the icon-only clear action. */
+@media (max-width: 600px) {
+  .panel-button,
+  .panel-chooser__card,
+  .panel-chooser__clear,
+  .panel-chooser select,
+  .panel-chooser input,
+  .custom-panel-form input,
+  .custom-panel-form select {
+    min-height: 44px;
+  }
+
+  .panel-chooser__clear {
+    top: 0;
+    right: 0;
+    width: 44px;
+    height: 44px;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .panel-button,
   .panel-chooser__card {

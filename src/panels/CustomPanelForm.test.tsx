@@ -77,6 +77,24 @@ describe('CustomPanelForm', () => {
     expect(onSubmit).not.toHaveBeenCalled()
   })
 
+  it('links invalid cell technology and frame colour selects to alert feedback', async () => {
+    const user = userEvent.setup()
+    render(<CustomPanelForm onSubmit={vi.fn<(panel: PanelSpec) => void>()} initialValues={{ ...validDraft, cellType: 'invalid', frameColor: 'invalid' }} />)
+
+    await user.click(screen.getByRole('button', { name: 'Save custom panel' }))
+
+    const cellType = screen.getByRole('combobox', { name: /Cell technology/ })
+    const frameColor = screen.getByRole('combobox', { name: /Frame colour/ })
+    expect(cellType).toHaveAttribute('aria-invalid', 'true')
+    expect(cellType).toHaveAttribute('aria-describedby', 'custom-panel-cellType-error')
+    expect(screen.getByText(/Cell technology must be one of/)).toMatchObject({ id: 'custom-panel-cellType-error' })
+    expect(screen.getByText(/Cell technology must be one of/)).toHaveAttribute('role', 'alert')
+    expect(frameColor).toHaveAttribute('aria-invalid', 'true')
+    expect(frameColor).toHaveAttribute('aria-describedby', 'custom-panel-frameColor-error')
+    expect(screen.getByText(/Frame colour must be one of/)).toHaveAttribute('id', 'custom-panel-frameColor-error')
+    expect(screen.getByText(/Frame colour must be one of/)).toHaveAttribute('role', 'alert')
+  })
+
   it('supports cancellation without submitting', async () => {
     const user = userEvent.setup()
     const onSubmit = vi.fn<(panel: PanelSpec) => void>()

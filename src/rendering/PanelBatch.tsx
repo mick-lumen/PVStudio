@@ -17,11 +17,14 @@ import {
   shouldFinishPanelDrag,
   type ActivePanelDrag,
   type PanelDragGlobalSignal,
-  compactPanelItemsByState,
+  changedPanelInstanceIndices,
+  createCompactPanelItems,
+  expandSphereBySphere,
   PANEL_VISUAL_STATE_ORDER,
   pointerCaptureTarget,
   syncInstancedMeshCount,
   toPanelLocalPoint,
+  type CompactPanelItems,
 } from './PanelBatch.helpers'
 import {
   getSharedPanelMaterialSet,
@@ -61,6 +64,11 @@ const SHARED_GEOMETRY: PanelGeometry = Object.freeze({
 /** Typed no-op raycast used while another scene tool owns pointer input. */
 export const NO_PANEL_RAYCAST: THREE.Mesh['raycast'] = (): void => {}
 
+/** Cell details are visual-only and must never become pointer targets. */
+export const PANEL_CELL_INTERACTION_PROPS: Readonly<{ readonly raycast: THREE.Mesh['raycast'] }> = Object.freeze({
+  raycast: NO_PANEL_RAYCAST,
+})
+
 function useMeshRefTuple() {
   const first = useRef<InstancedMeshRef>(null)
   const second = useRef<InstancedMeshRef>(null)
@@ -77,22 +85,71 @@ function instanceMatrix(
   target.fromArray(composePanelLocalMatrix(pose.matrix, translation, dimensions))
 }
 
+/**
+ * Update raycast/frustum bounds for changed instances only. The first write
+ * computes the complete sphere; subsequent writes expand the existing sphere
+ * from each changed instance and never scan untouched instance matrices.
+ */
+function updateChangedPanelBounds(
+  mesh: THREE.InstancedMesh,
+  changedIndices: readonly number[] | undefined,
+): void {
+  if (changedIndices === undefined || mesh.boundingSphere === null) {
+    mesh.computeBoundingSphere()
+    return
+  }
+  const bounds = mesh.boundingSphere
+  if (changedIndices.length === 0) return
+  if (mesh.geometry.boundingSphere === null) mesh.geometry.computeBoundingSphere()
+  const geometrySphere = mesh.geometry.boundingSphere
+  if (geometrySphere === null) {
+    mesh.computeBoundingSphere()
+    return
+  }
+  const matrix = new THREE.Matrix4()
+  const instanceSphere = new THREE.Sphere()
+  for (const index of changedIndices) {
+    if (index < 0 || index >= mesh.count) continue
+    matrix.fromArray(mesh.instanceMatrix.array, index * mesh.instanceMatrix.itemSize)
+    instanceSphere.copy(geometrySphere).applyMatrix4(matrix)
+    expandSphereBySphere(bounds, instanceSphere)
+  }
+}
+
 function setPanelMatrices(
   mesh: InstancedMeshRef,
   items: readonly PanelRenderItem[],
   translation: readonly [number, number, number],
   dimensions: readonly [number, number, number],
-): void {
-  if (mesh === null) return
+  changedIndices?: readonly number[],
+): number {
+  if (mesh === null) return 0
   const matrix = new THREE.Matrix4()
-  for (let index = 0; index < items.length; index += 1) {
-    const item = items[index]
-    if (item === undefined) continue
-    instanceMatrix(item.pose, translation, dimensions, matrix)
-    mesh.setMatrixAt(index, matrix)
+  let writes = 0
+  if (changedIndices === undefined) {
+    for (let index = 0; index < items.length; index += 1) {
+      const item = items[index]
+      if (item === undefined) continue
+      instanceMatrix(item.pose, translation, dimensions, matrix)
+      mesh.setMatrixAt(index, matrix)
+      writes += 1
+    }
+  } else {
+    for (const index of changedIndices) {
+      const item = items[index]
+      if (item === undefined) continue
+      instanceMatrix(item.pose, translation, dimensions, matrix)
+      mesh.setMatrixAt(index, matrix)
+      writes += 1
+    }
   }
-  mesh.instanceMatrix.needsUpdate = true
-  mesh.computeBoundingSphere()
+  if (writes > 0) {
+    mesh.instanceMatrix.needsUpdate = true
+    // Every panel mesh is raycastable, so its aggregate sphere must follow a
+    // moved instance. The incremental update expands only changed slots.
+    updateChangedPanelBounds(mesh, changedIndices)
+  }
+  return writes
 }
 
 function setCellMatrices(
@@ -106,33 +163,43 @@ function setCellMatrices(
   lineWidth: number,
   columns: number,
   rows: number,
-): void {
-  if (mesh === null) return
+  changedPanelIndices?: readonly number[],
+): number {
+  if (mesh === null) return 0
   const matrix = new THREE.Matrix4()
-  let instance = 0
   const barCount = horizontal ? Math.max(0, rows - 1) : Math.max(0, columns - 1)
-  for (let panelIndex = 0; panelIndex < items.length; panelIndex += 1) {
+  let writes = 0
+  const writePanel = (panelIndex: number): void => {
     const item = items[panelIndex]
-    if (item === undefined) continue
+    if (item === undefined) return
     if (horizontal) {
       for (let row = 1; row < rows; row += 1) {
         const y = -innerHeight / 2 + (innerHeight * row) / rows
+        const instance = panelIndex * barCount + row - 1
         instanceMatrix(item.pose, [0, y, frontOffset + cellDepth / 2], [innerWidth, lineWidth, cellDepth], matrix)
         mesh.setMatrixAt(instance, matrix)
-        instance += 1
+        writes += 1
       }
     } else {
       for (let column = 1; column < columns; column += 1) {
         const x = -innerWidth / 2 + (innerWidth * column) / columns
+        const instance = panelIndex * barCount + column - 1
         instanceMatrix(item.pose, [x, 0, frontOffset + cellDepth / 2], [lineWidth, innerHeight, cellDepth], matrix)
         mesh.setMatrixAt(instance, matrix)
-        instance += 1
+        writes += 1
       }
     }
   }
-  if (instance !== items.length * barCount) return
-  mesh.instanceMatrix.needsUpdate = true
-  mesh.computeBoundingSphere()
+  if (changedPanelIndices === undefined) {
+    for (let panelIndex = 0; panelIndex < items.length; panelIndex += 1) writePanel(panelIndex)
+  } else {
+    for (const panelIndex of changedPanelIndices) writePanel(panelIndex)
+  }
+  if (writes > 0) mesh.instanceMatrix.needsUpdate = true
+  // Cell bars are deliberately non-raycastable, so they do not need a
+  // bounding sphere for pointer interaction. Their compact matrices still
+  // update for only the affected panel slots.
+  return writes
 }
 
 function pointerInfo(
@@ -186,7 +253,8 @@ export const PanelBatch = forwardRef(function PanelBatch(
     () => PANEL_VISUAL_STATE_ORDER.map((state) => getSharedPanelMaterialSet(state, batch.visuals)),
     [batch.visuals],
   )
-  const stateItems = useMemo(() => compactPanelItemsByState(batch.items), [batch.items])
+  const compactItems = useMemo<CompactPanelItems>(() => createCompactPanelItems(batch.items), [batch.items])
+  const stateItems = compactItems.stateItems
   const glassRefs = useMeshRefTuple()
   const frameTopRefs = useMeshRefTuple()
   const frameBottomRefs = useMeshRefTuple()
@@ -201,11 +269,13 @@ export const PanelBatch = forwardRef(function PanelBatch(
   const groupRef = useRef<THREE.Group>(null)
   const activeDrag = useRef<ActiveDrag | null>(null)
   const latestBatchItems = useRef(batch.items)
+  const latestCompactItems = useRef(compactItems)
   const latestDragEnd = useRef(onPanelDragEnd)
   useLayoutEffect(() => {
     latestBatchItems.current = batch.items
+    latestCompactItems.current = compactItems
     latestDragEnd.current = onPanelDragEnd
-  }, [batch.items, onPanelDragEnd])
+  }, [batch.items, compactItems, onPanelDragEnd])
 
   const frameWidth = Math.min(0.026, batch.widthM / 6, batch.heightM / 6)
   const innerWidth = Math.max(0.001, batch.widthM - frameWidth * 2)
@@ -215,14 +285,17 @@ export const PanelBatch = forwardRef(function PanelBatch(
   const cellDepth = Math.max(0.001, batch.thicknessM * 0.18)
   const outlineWidth = Math.max(0.004, frameWidth * 0.38)
   const outlineDepth = Math.max(0.002, batch.thicknessM * 0.12)
-  const horizontalCellBarsPerPanel = Math.max(1, batch.cellRows - 1)
-  const verticalCellBarsPerPanel = Math.max(1, batch.cellColumns - 1)
+  const previousStateItems = useRef<readonly (readonly PanelRenderItem[])[] | null>(null)
 
   useLayoutEffect(() => {
     const frontOffset = frameDepth / 2
+    const previous = previousStateItems.current
     for (let stateIndex = 0; stateIndex < PANEL_VISUAL_STATE_ORDER.length; stateIndex += 1) {
       const items = stateItems[stateIndex]
       if (items === undefined) continue
+      const changedIndices = previous === null
+        ? undefined
+        : changedPanelInstanceIndices(previous[stateIndex] ?? [], items)
       const count = items.length
       const horizontalCellCount = count * Math.max(0, batch.cellRows - 1)
       const verticalCellCount = count * Math.max(0, batch.cellColumns - 1)
@@ -237,18 +310,19 @@ export const PanelBatch = forwardRef(function PanelBatch(
       syncInstancedMeshCount(outlineRightRefs[stateIndex]?.current ?? null, count)
       syncInstancedMeshCount(horizontalCellRefs[stateIndex]?.current ?? null, horizontalCellCount)
       syncInstancedMeshCount(verticalCellRefs[stateIndex]?.current ?? null, verticalCellCount)
-      setPanelMatrices(glassRefs[stateIndex]?.current ?? null, items, [0, 0, 0], [innerWidth, innerHeight, glassDepth])
-      setPanelMatrices(frameTopRefs[stateIndex]?.current ?? null, items, [0, (batch.heightM - frameWidth) / 2, 0], [batch.widthM, frameWidth, frameDepth])
-      setPanelMatrices(frameBottomRefs[stateIndex]?.current ?? null, items, [0, -(batch.heightM - frameWidth) / 2, 0], [batch.widthM, frameWidth, frameDepth])
-      setPanelMatrices(frameLeftRefs[stateIndex]?.current ?? null, items, [-(batch.widthM - frameWidth) / 2, 0, 0], [frameWidth, innerHeight, frameDepth])
-      setPanelMatrices(frameRightRefs[stateIndex]?.current ?? null, items, [(batch.widthM - frameWidth) / 2, 0, 0], [frameWidth, innerHeight, frameDepth])
-      setPanelMatrices(outlineTopRefs[stateIndex]?.current ?? null, items, [0, (batch.heightM - outlineWidth) / 2, frontOffset + outlineDepth / 2], [batch.widthM, outlineWidth, outlineDepth])
-      setPanelMatrices(outlineBottomRefs[stateIndex]?.current ?? null, items, [0, -(batch.heightM - outlineWidth) / 2, frontOffset + outlineDepth / 2], [batch.widthM, outlineWidth, outlineDepth])
-      setPanelMatrices(outlineLeftRefs[stateIndex]?.current ?? null, items, [-(batch.widthM - outlineWidth) / 2, 0, frontOffset + outlineDepth / 2], [outlineWidth, Math.max(outlineWidth, batch.heightM - outlineWidth * 2), outlineDepth])
-      setPanelMatrices(outlineRightRefs[stateIndex]?.current ?? null, items, [(batch.widthM - outlineWidth) / 2, 0, frontOffset + outlineDepth / 2], [outlineWidth, Math.max(outlineWidth, batch.heightM - outlineWidth * 2), outlineDepth])
-      setCellMatrices(horizontalCellRefs[stateIndex]?.current ?? null, items, true, innerWidth, innerHeight, frontOffset, cellDepth, batch.visuals.cellLineWidthM, batch.cellColumns, batch.cellRows)
-      setCellMatrices(verticalCellRefs[stateIndex]?.current ?? null, items, false, innerWidth, innerHeight, frontOffset, cellDepth, batch.visuals.cellLineWidthM, batch.cellColumns, batch.cellRows)
+      setPanelMatrices(glassRefs[stateIndex]?.current ?? null, items, [0, 0, 0], [innerWidth, innerHeight, glassDepth], changedIndices)
+      setPanelMatrices(frameTopRefs[stateIndex]?.current ?? null, items, [0, (batch.heightM - frameWidth) / 2, 0], [batch.widthM, frameWidth, frameDepth], changedIndices)
+      setPanelMatrices(frameBottomRefs[stateIndex]?.current ?? null, items, [0, -(batch.heightM - frameWidth) / 2, 0], [batch.widthM, frameWidth, frameDepth], changedIndices)
+      setPanelMatrices(frameLeftRefs[stateIndex]?.current ?? null, items, [-(batch.widthM - frameWidth) / 2, 0, 0], [frameWidth, innerHeight, frameDepth], changedIndices)
+      setPanelMatrices(frameRightRefs[stateIndex]?.current ?? null, items, [(batch.widthM - frameWidth) / 2, 0, 0], [frameWidth, innerHeight, frameDepth], changedIndices)
+      setPanelMatrices(outlineTopRefs[stateIndex]?.current ?? null, items, [0, (batch.heightM - outlineWidth) / 2, frontOffset + outlineDepth / 2], [batch.widthM, outlineWidth, outlineDepth], changedIndices)
+      setPanelMatrices(outlineBottomRefs[stateIndex]?.current ?? null, items, [0, -(batch.heightM - outlineWidth) / 2, frontOffset + outlineDepth / 2], [batch.widthM, outlineWidth, outlineDepth], changedIndices)
+      setPanelMatrices(outlineLeftRefs[stateIndex]?.current ?? null, items, [-(batch.widthM - outlineWidth) / 2, 0, frontOffset + outlineDepth / 2], [outlineWidth, Math.max(outlineWidth, batch.heightM - outlineWidth * 2), outlineDepth], changedIndices)
+      setPanelMatrices(outlineRightRefs[stateIndex]?.current ?? null, items, [(batch.widthM - outlineWidth) / 2, 0, frontOffset + outlineDepth / 2], [outlineWidth, Math.max(outlineWidth, batch.heightM - outlineWidth * 2), outlineDepth], changedIndices)
+      setCellMatrices(horizontalCellRefs[stateIndex]?.current ?? null, items, true, innerWidth, innerHeight, frontOffset, cellDepth, batch.visuals.cellLineWidthM, batch.cellColumns, batch.cellRows, changedIndices)
+      setCellMatrices(verticalCellRefs[stateIndex]?.current ?? null, items, false, innerWidth, innerHeight, frontOffset, cellDepth, batch.visuals.cellLineWidthM, batch.cellColumns, batch.cellRows, changedIndices)
     }
+    previousStateItems.current = stateItems
   }, [batch.cellColumns, batch.cellRows, batch.heightM, batch.thicknessM, batch.visuals.cellLineWidthM, batch.widthM, frameDepth, frameWidth, glassDepth, innerHeight, innerWidth, cellDepth, outlineDepth, outlineWidth, stateItems, glassRefs, frameTopRefs, frameBottomRefs, frameLeftRefs, frameRightRefs, outlineTopRefs, outlineBottomRefs, outlineLeftRefs, outlineRightRefs, horizontalCellRefs, verticalCellRefs])
 
   const itemForEvent = useCallback((event: ThreeEvent<PointerEvent>, items: readonly PanelRenderItem[], barsPerPanel = 1): { readonly item: PanelRenderItem; readonly index: number } | undefined => {
@@ -268,13 +342,21 @@ export const PanelBatch = forwardRef(function PanelBatch(
     }
   }, [])
 
+  const syncActiveDragIndex = useCallback((active: ActiveDrag): void => {
+    const resolved = latestCompactItems.current.instancesById.get(active.id)
+    if (resolved === undefined) return
+    active.index = resolved.instanceIndex
+    active.lastInfo = { ...active.lastInfo, instanceId: resolved.instanceIndex }
+  }, [])
+
   const finishDragWithInfo = useCallback((info: PanelPointerInfo, stopPropagation: (() => void) | undefined): void => {
     const active = activeDrag.current
     if (active === null) return
+    syncActiveDragIndex(active)
     activeDrag.current = null
     stopPropagation?.()
-    finishPanelDrag(active, latestBatchItems.current, latestDragEnd.current, info, releasePointer)
-  }, [releasePointer])
+    finishPanelDrag(active, latestBatchItems.current, latestDragEnd.current, { ...info, instanceId: active.index }, releasePointer, latestCompactItems.current.itemsById)
+  }, [releasePointer, syncActiveDragIndex])
 
   const setGroupRef = useCallback((group: THREE.Group | null): void => {
     groupRef.current = group
@@ -290,12 +372,14 @@ export const PanelBatch = forwardRef(function PanelBatch(
       if (signalType !== 'pointerup' && signalType !== 'pointercancel' && signalType !== 'lostpointercapture') return
       const signal: PanelDragGlobalSignal = { type: signalType, pointerId: native.pointerId }
       if (active === null || !shouldFinishPanelDrag(active, signal)) return
+      syncActiveDragIndex(active)
       const info = pointerInfoFromNative(native, active.lastInfo.worldPoint, active.index)
       finishDragWithInfo(info, undefined)
     }
     const finishFromLastInfo = (signal: Extract<PanelDragGlobalSignal, { readonly type: 'blur' | 'visibilitychange' }>): void => {
       const active = activeDrag.current
       if (active === null || !shouldFinishPanelDrag(active, signal)) return
+      syncActiveDragIndex(active)
       finishDragWithInfo(active.lastInfo, undefined)
     }
     const finishOnBlur = (): void => { finishFromLastInfo({ type: 'blur' }) }
@@ -316,7 +400,7 @@ export const PanelBatch = forwardRef(function PanelBatch(
       const active = activeDrag.current
       if (active !== null) finishDragWithInfo(active.lastInfo, undefined)
     }
-  }, [finishDragWithInfo])
+  }, [finishDragWithInfo, syncActiveDragIndex])
 
   const handlePointerDown = useCallback((event: ThreeEvent<PointerEvent>, items: readonly PanelRenderItem[], barsPerPanel = 1) => {
     if (!interactionsEnabled) return
@@ -335,7 +419,13 @@ export const PanelBatch = forwardRef(function PanelBatch(
       // R3F's `event.target` is the intersected THREE.Object3D. Native
       // pointer capture belongs to the DOM canvas target so moves continue
       // to arrive after the pointer leaves this panel's geometry.
-      const target = pointerCaptureTarget(event.nativeEvent.target) ?? {}
+      // Prefer Fiber's synthetic target: its capture method records this
+      // eventObject in `internal.capturedMap` and delegates DOM capture to
+      // the canvas. A native DOM target remains a safe fallback for hosts
+      // that dispatch pointer events without Fiber's synthetic interface.
+      const target = pointerCaptureTarget(event.target)
+        ?? pointerCaptureTarget(event.nativeEvent.target)
+        ?? {}
       target.setPointerCapture?.(event.nativeEvent.pointerId)
       activeDrag.current = {
         index: resolved.index,
@@ -353,29 +443,36 @@ export const PanelBatch = forwardRef(function PanelBatch(
     if (!interactionsEnabled) return
     const active = activeDrag.current
     if (active === null || event.nativeEvent.pointerId !== active.pointerId) return
-    const item = batch.items.find((candidate) => candidate.id === active.id)
-    if (item === undefined || !item.interactive) return
+    const resolved = latestCompactItems.current.instancesById.get(active.id)
+    const item = resolved?.item
+    if (resolved === undefined || item === undefined || !item.interactive) return
+    // A state transition can compact the item into a different slot while a
+    // native pointer capture keeps the same drag alive. Keep callback metadata
+    // aligned with the latest compact instance without scanning the batch.
+    active.index = resolved.instanceIndex
     event.stopPropagation()
     const info = pointerInfo(event, active.index, groupRef.current)
     active.lastInfo = info
     onPanelDrag?.(item.placement, info)
-  }, [batch.items, interactionsEnabled, onPanelDrag])
+  }, [interactionsEnabled, onPanelDrag])
 
   const finishDrag = useCallback((event: ThreeEvent<PointerEvent>) => {
     if (!interactionsEnabled) return
     const active = activeDrag.current
     if (active === null || event.nativeEvent.pointerId !== active.pointerId) return
+    syncActiveDragIndex(active)
     const info = pointerInfo(event, active.index, groupRef.current)
     finishDragWithInfo(info, () => { event.stopPropagation() })
-  }, [finishDragWithInfo, interactionsEnabled])
+  }, [finishDragWithInfo, interactionsEnabled, syncActiveDragIndex])
 
   const handleLostPointerCapture = useCallback((event: ThreeEvent<PointerEvent>) => {
     if (!interactionsEnabled) return
     const active = activeDrag.current
     if (active === null || event.nativeEvent.pointerId !== active.pointerId) return
+    syncActiveDragIndex(active)
     const info = pointerInfo(event, active.index, groupRef.current)
     finishDragWithInfo(info, () => { event.stopPropagation() })
-  }, [finishDragWithInfo, interactionsEnabled])
+  }, [finishDragWithInfo, interactionsEnabled, syncActiveDragIndex])
 
   const stateInteractionProps = useMemo(() => stateItems.map((items, stateIndex) => {
     const state = PANEL_VISUAL_STATE_ORDER[stateIndex] ?? 'placed'
@@ -394,22 +491,13 @@ export const PanelBatch = forwardRef(function PanelBatch(
         onPointerCancel: (event: ThreeEvent<PointerEvent>): void => { finishDrag(event) },
         onLostPointerCapture: (event: ThreeEvent<PointerEvent>): void => { handleLostPointerCapture(event) },
       } : { raycast: NO_PANEL_RAYCAST },
-      horizontalCell: stateInteractionsEnabled ? {
-        onPointerDown: (event: ThreeEvent<PointerEvent>): void => { handlePointerDown(event, items, horizontalCellBarsPerPanel) },
-        onPointerMove: (event: ThreeEvent<PointerEvent>): void => { handlePointerMove(event) },
-        onPointerUp: (event: ThreeEvent<PointerEvent>): void => { finishDrag(event) },
-        onPointerCancel: (event: ThreeEvent<PointerEvent>): void => { finishDrag(event) },
-        onLostPointerCapture: (event: ThreeEvent<PointerEvent>): void => { handleLostPointerCapture(event) },
-      } : { raycast: NO_PANEL_RAYCAST },
-      verticalCell: stateInteractionsEnabled ? {
-        onPointerDown: (event: ThreeEvent<PointerEvent>): void => { handlePointerDown(event, items, verticalCellBarsPerPanel) },
-        onPointerMove: (event: ThreeEvent<PointerEvent>): void => { handlePointerMove(event) },
-        onPointerUp: (event: ThreeEvent<PointerEvent>): void => { finishDrag(event) },
-        onPointerCancel: (event: ThreeEvent<PointerEvent>): void => { finishDrag(event) },
-        onLostPointerCapture: (event: ThreeEvent<PointerEvent>): void => { handleLostPointerCapture(event) },
-      } : { raycast: NO_PANEL_RAYCAST },
+      // Cell bars sit on top of the glass but are visual details only. Keep
+      // them out of the raycast list so the panel's glass/frame receives one
+      // stable pointer target regardless of the cell grid density.
+      horizontalCell: PANEL_CELL_INTERACTION_PROPS,
+      verticalCell: PANEL_CELL_INTERACTION_PROPS,
     }
-  }), [finishDrag, handleLostPointerCapture, handlePointerDown, handlePointerMove, horizontalCellBarsPerPanel, interactionsEnabled, stateItems, verticalCellBarsPerPanel])
+  }), [finishDrag, handleLostPointerCapture, handlePointerDown, handlePointerMove, interactionsEnabled, stateItems])
 
   return (
     <group ref={setGroupRef} name={`pv-panel-batch-${batch.key}`}>
@@ -433,8 +521,8 @@ export const PanelBatch = forwardRef(function PanelBatch(
             <instancedMesh ref={outlineBottomRefs[stateIndex]} args={[SHARED_GEOMETRY.outlineHorizontal, material.frame, count]} castShadow={castShadow} receiveShadow={castShadow} {...stateProps.panel} />
             <instancedMesh ref={outlineLeftRefs[stateIndex]} args={[SHARED_GEOMETRY.outlineVertical, material.frame, count]} castShadow={castShadow} receiveShadow={castShadow} {...stateProps.panel} />
             <instancedMesh ref={outlineRightRefs[stateIndex]} args={[SHARED_GEOMETRY.outlineVertical, material.frame, count]} castShadow={castShadow} receiveShadow={castShadow} {...stateProps.panel} />
-            <instancedMesh ref={horizontalCellRefs[stateIndex]} args={[SHARED_GEOMETRY.cellHorizontal, material.cell, horizontalCellCount]} castShadow={false} receiveShadow={false} {...stateProps.horizontalCell} />
-            <instancedMesh ref={verticalCellRefs[stateIndex]} args={[SHARED_GEOMETRY.cellVertical, material.cell, verticalCellCount]} castShadow={false} receiveShadow={false} {...stateProps.verticalCell} />
+            <instancedMesh ref={horizontalCellRefs[stateIndex]} args={[SHARED_GEOMETRY.cellHorizontal, material.cell, horizontalCellCount]} castShadow={false} receiveShadow={false} frustumCulled={false} {...stateProps.horizontalCell} />
+            <instancedMesh ref={verticalCellRefs[stateIndex]} args={[SHARED_GEOMETRY.cellVertical, material.cell, verticalCellCount]} castShadow={false} receiveShadow={false} frustumCulled={false} {...stateProps.verticalCell} />
           </group>
         )
       })}

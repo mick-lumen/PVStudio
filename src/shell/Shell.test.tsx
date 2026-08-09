@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, within } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
-import type { PanelGroupSettings, RectangularObstacle } from '../core'
+import type { PanelGroupSettings, RectangularObstacle, SurfaceEdgeMetadata } from '../core'
 import {
   Shell,
   ShellErrorBoundary,
@@ -9,6 +9,7 @@ import {
   type PanelPlacementSummary,
   type ShellPanel,
   type ShellSurface,
+  type ShellSurfaceEdge,
 } from './Shell'
 
 const surface: ShellSurface = {
@@ -98,21 +99,95 @@ describe('Shell', () => {
     const originalInnerWidth = window.innerWidth
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 320 })
     try {
-      render(<Shell webglAvailable={true} />)
-      const inspector = screen.getByRole('complementary', { name: 'Panel library and inspector' })
+      const { container } = render(<Shell webglAvailable={true} />)
+      const inspector = container.querySelector('#workspace-side-panel') as HTMLElement
       expect(inspector).not.toHaveClass('inspector-panel--open')
+      expect(inspector).toHaveAttribute('aria-hidden', 'true')
+      expect(inspector).toHaveAttribute('inert')
       const openButton = screen.getByRole('button', { name: 'Open panel' })
 
       fireEvent.click(openButton)
       expect(inspector).toHaveClass('inspector-panel--open')
+      expect(inspector).toHaveAttribute('aria-hidden', 'false')
+      expect(inspector).not.toHaveAttribute('inert')
       expect(screen.getByRole('button', { name: 'Dismiss side panel' })).toBeInTheDocument()
 
       fireEvent.keyDown(window, { key: 'Escape' })
       expect(inspector).not.toHaveClass('inspector-panel--open')
+      expect(inspector).toHaveAttribute('aria-hidden', 'true')
+      expect(inspector).toHaveAttribute('inert')
+      expect(screen.getByRole('button', { name: 'Open panel' })).toHaveFocus()
       expect(screen.queryByRole('button', { name: 'Dismiss side panel' })).not.toBeInTheDocument()
     } finally {
       Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalInnerWidth })
     }
+  })
+
+  it('keeps compact design tools off-canvas and restores focus after closing them', () => {
+    const originalInnerWidth = window.innerWidth
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 320 })
+    try {
+      const { container } = render(<Shell webglAvailable={true} />)
+      const rail = container.querySelector('#design-tools') as HTMLElement
+      const menu = screen.getByRole('button', { name: 'Open design tools' })
+      expect(rail).toHaveAttribute('aria-hidden', 'true')
+      expect(rail).toHaveAttribute('inert')
+
+      fireEvent.click(menu)
+      expect(screen.getByRole('button', { name: /^Select/ })).toHaveFocus()
+      expect(rail).toHaveAttribute('aria-hidden', 'false')
+      expect(rail).not.toHaveAttribute('inert')
+      fireEvent.click(menu)
+      expect(menu).toHaveFocus()
+      expect(rail).toHaveAttribute('aria-hidden', 'true')
+      expect(rail).toHaveAttribute('inert')
+    } finally {
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalInnerWidth })
+    }
+  })
+
+  it('reacts when the viewport crosses the compact breakpoint', () => {
+    const originalInnerWidth = window.innerWidth
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1024 })
+    try {
+      const { container } = render(<Shell webglAvailable={true} />)
+      const rail = container.querySelector('#design-tools') as HTMLElement
+      const inspector = container.querySelector('#workspace-side-panel') as HTMLElement
+      expect(rail).toHaveAttribute('aria-hidden', 'false')
+      expect(inspector).toHaveAttribute('aria-hidden', 'false')
+
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 })
+      fireEvent(window, new Event('resize'))
+      expect(rail).toHaveAttribute('aria-hidden', 'true')
+      expect(rail).toHaveAttribute('inert')
+      expect(inspector).toHaveAttribute('aria-hidden', 'true')
+      expect(inspector).toHaveAttribute('inert')
+      expect(screen.getByRole('button', { name: 'Open panel' })).toBeInTheDocument()
+
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1024 })
+      fireEvent(window, new Event('resize'))
+      expect(rail).toHaveAttribute('aria-hidden', 'false')
+      expect(rail).not.toHaveAttribute('inert')
+      expect(inspector).toHaveAttribute('aria-hidden', 'false')
+      expect(inspector).not.toHaveAttribute('inert')
+      expect(screen.queryByRole('button', { name: 'Open panel' })).not.toBeInTheDocument()
+    } finally {
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalInnerWidth })
+    }
+  })
+
+  it('does not expose inert orbit or measure tools and keeps viewer navigation discoverable', () => {
+    render(<Shell webglAvailable={true} />)
+    expect(screen.queryByRole('button', { name: /^Orbit/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /^Measure/ })).not.toBeInTheDocument()
+    expect(screen.getByRole('region', { name: /Drag to orbit.*pinch to zoom.*pan/i })).toBeInTheDocument()
+
+    fireEvent.keyDown(window, { key: 'o' })
+    fireEvent.keyDown(window, { key: 'm' })
+    expect(screen.getByLabelText('Workspace status')).toHaveTextContent('Ready')
+    fireEvent.click(screen.getByRole('button', { name: 'Shortcuts' }))
+    const shortcuts = screen.getByRole('dialog', { name: 'Keyboard shortcuts' })
+    expect(shortcuts).not.toHaveTextContent(/Orbit|Measure/i)
   })
 
   it('keeps Auto-fill unavailable without a callback for toolbar and shortcut activation', () => {
@@ -379,6 +454,113 @@ describe('Shell', () => {
     expect(screen.getByText('Setback 200 mm · row 30 mm')).toBeInTheDocument()
   })
 
+  it('keeps optional auto-fill controls unset for legacy settings and validates edits', () => {
+    const onSettingsChange = vi.fn()
+    const { rerender } = render(<Shell settings={settings} settingsScopeLabel="Group array-1" onSettingsChange={onSettingsChange} webglAvailable={true} />)
+    fireEvent.click(screen.getByRole('tab', { name: 'Inspector' }))
+
+    const modulesPerRow = screen.getByRole('spinbutton', { name: 'Modules per row' })
+    const rowOffset = screen.getByRole('spinbutton', { name: 'Row offset in metres' })
+    const obstacleClearance = screen.getByRole('spinbutton', { name: 'Obstacle clearance in metres' })
+    expect(modulesPerRow).toHaveValue(null)
+    expect(rowOffset).toHaveValue(null)
+    expect(obstacleClearance).toHaveValue(null)
+    expect(modulesPerRow).toHaveAttribute('placeholder', 'Auto')
+
+    fireEvent.change(modulesPerRow, { target: { value: '0' } })
+    fireEvent.change(modulesPerRow, { target: { value: '1.5' } })
+    fireEvent.change(rowOffset, { target: { value: '-0.01' } })
+    fireEvent.change(obstacleClearance, { target: { value: 'NaN' } })
+    expect(onSettingsChange).not.toHaveBeenCalled()
+
+    fireEvent.change(modulesPerRow, { target: { value: '8' } })
+    fireEvent.change(rowOffset, { target: { value: '0.35' } })
+    fireEvent.change(obstacleClearance, { target: { value: '0.2' } })
+    expect(onSettingsChange).toHaveBeenNthCalledWith(1, { modulesPerRow: 8 })
+    expect(onSettingsChange).toHaveBeenNthCalledWith(2, { rowOffsetM: 0.35 })
+    expect(onSettingsChange).toHaveBeenNthCalledWith(3, { obstacleClearanceM: 0.2 })
+
+    rerender(<Shell settings={{ ...settings, modulesPerRow: 6, rowOffsetM: 0.25, obstacleClearanceM: 0.1 }} onSettingsChange={onSettingsChange} webglAvailable={true} />)
+    expect(screen.getByRole('spinbutton', { name: 'Modules per row' })).toHaveValue(6)
+    expect(screen.getByRole('spinbutton', { name: 'Row offset in metres' })).toHaveValue(0.25)
+    expect(screen.getByRole('spinbutton', { name: 'Obstacle clearance in metres' })).toHaveValue(0.1)
+
+    fireEvent.change(screen.getByRole('spinbutton', { name: 'Modules per row' }), { target: { value: '' } })
+    expect(onSettingsChange).toHaveBeenNthCalledWith(4, { modulesPerRow: undefined })
+  })
+
+  it('shows the selected edge path and edits its type and direction', () => {
+    const onSurfaceEdgeChange = vi.fn<(edge: SurfaceEdgeMetadata | undefined) => void>()
+    const edge: ShellSurfaceEdge = {
+      surfaceId: surface.id,
+      type: 'gutter',
+      direction: { x: 1, y: 0 },
+      label: 'Gutter',
+      path: `Surface ${surface.id} › Gutter`,
+    }
+    render(<Shell selectedSurface={surface} selectedSurfaceEdge={edge} onSurfaceEdgeChange={onSurfaceEdgeChange} webglAvailable={true} />)
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Inspector' }))
+    expect(screen.getByTestId('surface-edge-path')).toHaveTextContent(`Surface ${surface.id} › Gutter`)
+    expect(screen.getByRole('combobox', { name: 'Surface edge type' })).toHaveValue('gutter')
+    expect(screen.getByTestId('surface-edge-direction')).toHaveTextContent('1.00, 0.00')
+
+    fireEvent.change(screen.getByRole('combobox', { name: 'Surface edge type' }), { target: { value: 'ridge' } })
+    expect(onSurfaceEdgeChange).toHaveBeenNthCalledWith(1, { type: 'ridge', direction: { x: 1, y: 0 } })
+    fireEvent.click(screen.getByRole('button', { name: 'Reverse surface edge direction' }))
+    expect(onSurfaceEdgeChange).toHaveBeenNthCalledWith(2, { type: 'gutter', direction: { x: -1, y: 0 } })
+  })
+
+  it('round-trips authored edge direction, line and interior side fields', () => {
+    const onSurfaceEdgeChange = vi.fn<(edge: SurfaceEdgeMetadata | undefined) => void>()
+    const edge: ShellSurfaceEdge = {
+      surfaceId: surface.id,
+      type: 'gutter',
+      direction: { x: 1, y: 0 },
+      line: { origin: { x: 0, y: 2 }, direction: { x: 1, y: 0 } },
+      label: 'Gutter',
+      path: `Surface ${surface.id} › Gutter`,
+    }
+    render(<Shell selectedSurface={surface} selectedSurfaceEdge={edge} onSurfaceEdgeChange={onSurfaceEdgeChange} webglAvailable={true} />)
+    fireEvent.click(screen.getByRole('tab', { name: 'Inspector' }))
+
+    fireEvent.change(screen.getByTestId('surface-edge-direction-x'), { target: { value: '2' } })
+    expect(onSurfaceEdgeChange).toHaveBeenNthCalledWith(1, {
+      type: 'gutter',
+      direction: { x: 2, y: 0 },
+      line: { origin: { x: 0, y: 2 }, direction: { x: 1, y: 0 } },
+    })
+    fireEvent.change(screen.getByTestId('surface-edge-line-origin-y'), { target: { value: '3' } })
+    expect(onSurfaceEdgeChange).toHaveBeenNthCalledWith(2, {
+      type: 'gutter',
+      direction: { x: 1, y: 0 },
+      line: { origin: { x: 0, y: 3 }, direction: { x: 1, y: 0 } },
+    })
+    fireEvent.change(screen.getByTestId('surface-edge-line-direction-y'), { target: { value: '1' } })
+    expect(onSurfaceEdgeChange).toHaveBeenNthCalledWith(3, {
+      type: 'gutter',
+      direction: { x: 1, y: 0 },
+      line: { origin: { x: 0, y: 2 }, direction: { x: 1, y: 1 } },
+    })
+    fireEvent.change(screen.getByTestId('surface-edge-side'), { target: { value: 'right' } })
+    expect(onSurfaceEdgeChange).toHaveBeenNthCalledWith(4, {
+      type: 'gutter',
+      direction: { x: 1, y: 0 },
+      line: { origin: { x: 0, y: 2 }, direction: { x: 1, y: 0 } },
+      side: 'right',
+    })
+  })
+
+  it('makes the global or group settings scope explicit in the inspector', () => {
+    const onSettingsChange = vi.fn()
+    const { rerender } = render(<Shell settings={settings} onSettingsChange={onSettingsChange} webglAvailable={true} />)
+    fireEvent.click(screen.getByRole('tab', { name: 'Inspector' }))
+    expect(screen.getByTestId('settings-scope')).toHaveTextContent('Editing Global defaults')
+
+    rerender(<Shell settings={settings} settingsScopeLabel="Group group-7" onSettingsChange={onSettingsChange} webglAvailable={true} />)
+    expect(screen.getByTestId('settings-scope')).toHaveTextContent('Editing Group group-7')
+  })
+
   it('keeps the shell usable when browser storage is unavailable', () => {
     const getItem = vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => { throw new Error('storage blocked') })
     const setItem = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('storage blocked') })
@@ -443,9 +625,9 @@ describe('Shell', () => {
     const onUndo = vi.fn()
     const onRedo = vi.fn()
     const { rerender } = render(<Shell canUndo={false} canRedo={false} onUndo={onUndo} onRedo={onRedo} selectedPlacementIds={['placement-a']} webglAvailable={true} />)
-    expect(screen.getByRole('button', { name: 'Fit model to view' })).toBeDisabled()
-    expect(screen.getByRole('button', { name: 'Help and documentation' })).toBeDisabled()
-    expect(screen.getByRole('button', { name: 'Project layers' })).toBeDisabled()
+    expect(screen.queryByRole('button', { name: 'Fit model to view' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Help and documentation' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Project layers' })).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: /^Align/ })).toBeDisabled()
 
     fireEvent.keyDown(window, { key: 'z', ctrlKey: true })
@@ -466,7 +648,7 @@ describe('Shell', () => {
     expect(onHelp).toHaveBeenCalledTimes(1)
     expect(onLayersOpen).toHaveBeenCalledTimes(1)
     rerender(<Shell webglAvailable={true} />)
-    expect(screen.getByRole('button', { name: 'Fit model to view' })).toBeDisabled()
+    expect(screen.queryByRole('button', { name: 'Fit model to view' })).not.toBeInTheDocument()
   })
 
   it('traps focus in the blocking align dialog and returns focus on cancel', () => {

@@ -7,6 +7,9 @@ import {
   isPoint2,
   isRectangularObstacle,
   isSurfaceRegion,
+  isSurfaceEdgeType,
+  isSurfaceEdgeSide,
+  SURFACE_EDGE_DIRECTION_EPSILON,
   type AutoFillCandidate,
   type AutoFillPreview,
   type AutoFillRequest,
@@ -19,6 +22,10 @@ import {
   type Rect,
   type RectangularObstacle,
   type SurfaceDescriptor,
+  type SurfaceEdgeLine,
+  type SurfaceEdgeMetadata,
+  type SurfaceEdgeSide,
+  type SurfaceEdgeType,
   type SurfaceNormal,
   type SurfaceRegion,
 } from '../core'
@@ -26,12 +33,19 @@ import {
   boundsOfRegion,
   calculateTotalKwp,
   calculateTotalWattage,
+  deriveSurfaceEdgeAxes,
+  GEOMETRY_EPSILON,
   generateAutoFill,
   isValidSurfaceDescriptor,
   normaliseRect,
   orientedFootprint,
+  orientedFootprintCorners,
+  orientedCandidateInsideRegion,
+  orientedObstacleOverlap,
+  polygonOverlap,
   pointOnSurface,
   rectangleInsideSurfaceRegion,
+  rectangleCorners,
   rectanglesOverlap,
   rectanglesOverlapWithSpacing,
 } from './geometry'
@@ -45,6 +59,18 @@ const isRecord = (value: unknown): value is Record<string, unknown> => typeof va
 const isStringList = (value: unknown): value is readonly string[] =>
   Array.isArray(value) && value.every((entry) => typeof entry === 'string')
 
+const isFiniteSelectionPolygon = (value: unknown): value is readonly Point2[] => {
+  if (!Array.isArray(value) || value.length < 3 || !value.every(isFinitePoint)) return false
+  let signedArea = 0
+  for (let index = 0; index < value.length; index += 1) {
+    const current = value[index]
+    const next = value[(index + 1) % value.length]
+    if (current === undefined || next === undefined) return false
+    signedArea += current.x * next.y - next.x * current.y
+  }
+  return Math.abs(signedArea) > GEOMETRY_EPSILON
+}
+
 const validPanel = (panel: PanelDefinition | undefined): panel is PanelDefinition =>
   panel !== undefined && isPanelDefinition(panel)
 
@@ -57,6 +83,18 @@ type SettingsPatch = Partial<PanelGroupSettings>
 
 const mergeSettings = (base: PanelGroupSettings, patch: unknown): PanelGroupSettings | undefined => {
   const safePatch = typeof patch === 'object' && patch !== null ? patch as SettingsPatch : {}
+  // Optional auto-fill controls intentionally distinguish an omitted property
+  // (keep the inherited value) from an explicit `undefined` (clear the value).
+  // The inspector uses the latter when a user returns a field to its legacy
+  // automatic mode. Required settings retain the usual nullish merge below.
+  const optionalSetting = <K extends 'modulesPerRow' | 'rowOffsetM' | 'obstacleClearanceM'>(
+    key: K,
+  ): PanelGroupSettings[K] => Object.prototype.hasOwnProperty.call(safePatch, key)
+    ? safePatch[key]
+    : base[key]
+  const modulesPerRow = optionalSetting('modulesPerRow')
+  const rowOffsetM = optionalSetting('rowOffsetM')
+  const obstacleClearanceM = optionalSetting('obstacleClearanceM')
   const candidate: PanelGroupSettings = {
     orientation: safePatch.orientation ?? base.orientation,
     interPanelSpacingM: safePatch.interPanelSpacingM ?? base.interPanelSpacingM,
@@ -64,6 +102,9 @@ const mergeSettings = (base: PanelGroupSettings, patch: unknown): PanelGroupSett
     setbackM: safePatch.setbackM ?? base.setbackM,
     clearanceM: safePatch.clearanceM ?? base.clearanceM,
     tiltDeg: safePatch.tiltDeg ?? base.tiltDeg,
+    ...(modulesPerRow === undefined ? {} : { modulesPerRow }),
+    ...(rowOffsetM === undefined ? {} : { rowOffsetM }),
+    ...(obstacleClearanceM === undefined ? {} : { obstacleClearanceM }),
   }
   return validSettings(candidate) ? candidate : undefined
 }
@@ -76,6 +117,9 @@ const settingsEqual = (first: PanelGroupSettings, second: PanelGroupSettings): b
   && first.setbackM === second.setbackM
   && first.clearanceM === second.clearanceM
   && first.tiltDeg === second.tiltDeg
+  && first.modulesPerRow === second.modulesPerRow
+  && first.rowOffsetM === second.rowOffsetM
+  && first.obstacleClearanceM === second.obstacleClearanceM
 const clonePanel = (panel: PanelDefinition): PanelDefinition => ({ ...panel })
 const clonePlacement = (placement: PanelPlacement): PanelPlacement => ({
   ...placement,
@@ -139,6 +183,19 @@ const surfaceMap = (
       },
       region,
       faceRefs: surface.faceRefs.map((ref) => ({ ...ref, faceIndices: [...ref.faceIndices] })),
+      ...(surface.edge === undefined ? {} : {
+        edge: {
+          type: surface.edge.type,
+          direction: clonePoint(surface.edge.direction),
+          ...(surface.edge.line === undefined ? {} : {
+            line: {
+              origin: clonePoint(surface.edge.line.origin),
+              direction: clonePoint(surface.edge.line.direction),
+            },
+          }),
+          ...(surface.edge.side === undefined ? {} : { side: surface.edge.side }),
+        },
+      }),
     }
     result[id] = deepFreeze(cloned)
   }
@@ -151,16 +208,18 @@ const surfaceMap = (
   return Object.freeze(result)
 }
 
-export interface GutterLine {
-  readonly origin: Point2
-  readonly direction: Point2
-}
+export type GutterLine = SurfaceEdgeLine
 
 export interface SurfaceGutter {
   readonly surfaceId: string
   readonly direction: Point2
   readonly line?: GutterLine
+  readonly side?: SurfaceEdgeSide
+  /** Omitted by legacy gutter payloads; normalisation defaults to gutter. */
+  readonly type?: SurfaceEdgeType
 }
+
+type SurfaceGutterOverride = SurfaceGutter | null
 
 const isGutterList = (value: unknown): value is readonly SurfaceGutter[] =>
   Array.isArray(value)
@@ -170,7 +229,7 @@ export interface PlacementContext {
   readonly surfaces?: readonly SurfaceDescriptor[] | Readonly<Record<string, SurfaceDescriptor>>
   readonly obstacles?: readonly RectangularObstacle[] | Readonly<Record<string, readonly RectangularObstacle[]>>
   readonly surfaceObstacles?: readonly RectangularObstacle[] | Readonly<Record<string, readonly RectangularObstacle[]>>
-  readonly gutters?: readonly SurfaceGutter[] | Readonly<Record<string, SurfaceGutter>>
+  readonly gutters?: readonly SurfaceGutter[] | Readonly<Record<string, SurfaceGutterOverride>>
 }
 
 export interface PlacementTotals {
@@ -231,6 +290,27 @@ export interface PlacementState extends PlacementSnapshot {
   readonly redoDepth: number
 }
 
+/**
+ * Return the only group represented by the current selection. A selection
+ * containing ungrouped placements, no placements, or more than one group is
+ * edited through the global defaults instead of accidentally changing one
+ * group's settings.
+ */
+export function editableGroupIdFor(
+  state: Pick<PlacementSnapshot, 'placements' | 'selectedIds'>,
+): string | undefined {
+  const selected = state.selectedIds
+    .map((id) => state.placements[id])
+    .filter((placement): placement is PanelPlacement => placement !== undefined)
+  const first = selected[0]
+  const groupId = first?.groupId
+  if (groupId === undefined || selected.length === 0) return undefined
+  return selected.every((placement) => placement.groupId === groupId) ? groupId : undefined
+}
+
+/** Backwards-compatible descriptive alias for hosts that prefer a getter name. */
+export const getEditableGroupId = editableGroupIdFor
+
 export interface PlacementStoreOptions extends PlacementContext {
   readonly settings?: Partial<PanelGroupSettings>
   readonly groupSettings?: Readonly<Record<string, Partial<PanelGroupSettings>>>
@@ -260,9 +340,22 @@ export interface GutterFacingData {
   readonly surfaceId: string
   readonly direction: Point2
   readonly line?: GutterLine
+  readonly side?: SurfaceEdgeSide
   readonly orientation: Orientation
   readonly azimuthDeg: number
 }
+
+export interface SurfaceEdgeSummary {
+  readonly surfaceId: string
+  readonly type: SurfaceEdgeType
+  readonly label: string
+  readonly path: string
+  readonly direction: Point2
+  readonly line?: GutterLine
+  readonly side?: SurfaceEdgeSide
+}
+
+const edgeLabel = (type: SurfaceEdgeType): string => type.charAt(0).toUpperCase() + type.slice(1)
 
 export interface AutoFillPreviewOptions {
   readonly panelId: string
@@ -271,6 +364,7 @@ export interface AutoFillPreviewOptions {
   readonly obstacles?: readonly RectangularObstacle[]
   readonly settings?: Partial<PanelGroupSettings>
   readonly groupId?: string
+  readonly edge?: SurfaceEdgeMetadata
 }
 
 const cloneManual = (draft: ManualPlacementDraft): ManualPlacementDraft => ({
@@ -293,6 +387,19 @@ const cloneAutoFillPreview = (preview: AutoFillPreview): AutoFillPreview => ({
     region: cloneRegion(preview.request.region),
     obstacles: preview.request.obstacles.map(cloneObstacle),
     settings: cloneSettings(preview.request.settings),
+    ...(preview.request.edge === undefined ? {} : {
+      edge: {
+        type: preview.request.edge.type,
+        direction: clonePoint(preview.request.edge.direction),
+        ...(preview.request.edge.line === undefined ? {} : {
+          line: {
+            origin: clonePoint(preview.request.edge.line.origin),
+            direction: clonePoint(preview.request.edge.line.direction),
+          },
+        }),
+        ...(preview.request.edge.side === undefined ? {} : { side: preview.request.edge.side }),
+      },
+    }),
   },
   candidates: preview.candidates.map(cloneCandidate),
   totalWattageW: preview.totalWattageW,
@@ -370,10 +477,81 @@ const panelRect = (placement: PanelPlacement, panel: PanelDefinition): Rect => {
   }
 }
 
+/** Convert the backwards-compatible gutter record into the strict edge shape
+ * consumed by the oriented placement helpers. */
+const edgeMetadataFromGutter = (edge: SurfaceGutter | undefined): SurfaceEdgeMetadata | undefined => {
+  if (edge === undefined) return undefined
+  const type = edge.type ?? 'gutter'
+  return {
+    type,
+    direction: { ...edge.direction },
+    ...(edge.line === undefined ? {} : {
+      line: {
+        origin: { ...edge.line.origin },
+        direction: { ...edge.line.direction },
+      },
+    }),
+    ...(edge.side === undefined ? {} : { side: edge.side }),
+  }
+}
+
+const expandedObstacle = (obstacle: RectangularObstacle, clearanceM: number): Rect => ({
+  x: obstacle.x - clearanceM,
+  y: obstacle.y - clearanceM,
+  width: obstacle.width + 2 * clearanceM,
+  height: obstacle.height + 2 * clearanceM,
+})
+
+type SurfaceLookup = (surfaceId: string) => SurfaceDescriptor | undefined
+type SurfaceEdgeLookup = (surfaceId: string) => SurfaceEdgeMetadata | undefined
+
+/** Test a pair using the same edge-oriented footprints used by generation. */
+const pairwiseSpacingConflict = (
+  first: PanelPlacement,
+  second: PanelPlacement,
+  panelFirst: PanelDefinition,
+  panelSecond: PanelDefinition,
+  settingsFirst: PanelGroupSettings,
+  settingsSecond: PanelGroupSettings,
+  surface: SurfaceDescriptor | undefined,
+  edge: SurfaceEdgeMetadata | undefined,
+): boolean => {
+  // Match rectanglesOverlapWithSpacing's inclusive-boundary convention: a
+  // pair whose edge gap is exactly the requested spacing remains valid.
+  const horizontal = Math.max(0, Math.max(settingsFirst.interPanelSpacingM, settingsSecond.interPanelSpacingM) - 2 * GEOMETRY_EPSILON)
+  const vertical = Math.max(0, Math.max(settingsFirst.rowSpacingM, settingsSecond.rowSpacingM) - 2 * GEOMETRY_EPSILON)
+  if (surface !== undefined && edge !== undefined) {
+    const axes = deriveSurfaceEdgeAxes(edge, surface.region)
+    const firstFootprint = orientedFootprint(panelFirst, first.orientation)
+    const secondFootprint = orientedFootprint(panelSecond, second.orientation)
+    const firstCorners = orientedFootprintCorners(
+      first.localCenter,
+      firstFootprint.widthM + 2 * horizontal,
+      firstFootprint.heightM + 2 * vertical,
+      axes,
+    )
+    const secondCorners = orientedFootprintCorners(
+      second.localCenter,
+      secondFootprint.widthM,
+      secondFootprint.heightM,
+      axes,
+    )
+    return polygonOverlap(firstCorners, secondCorners)
+  }
+  return rectanglesOverlapWithSpacing(
+    panelRect(first, panelFirst),
+    panelRect(second, panelSecond),
+    horizontal,
+    vertical,
+  )
+}
+
 const pairwiseSpacingValid = (
   placements: readonly PanelPlacement[],
   definitions: Readonly<Record<string, PanelDefinition>>,
   settingsFor: (groupId: string | undefined) => PanelGroupSettings,
+  surfaceFor?: SurfaceLookup,
+  edgeFor?: SurfaceEdgeLookup,
 ): boolean => {
   for (let first = 0; first < placements.length; first += 1) {
     const a = placements[first]
@@ -385,7 +563,16 @@ const pairwiseSpacingValid = (
       if (b === undefined || !validPanel(panelB) || a.surfaceId !== b.surfaceId) continue
       const settingsA = settingsFor(a.groupId)
       const settingsB = settingsFor(b.groupId)
-      if (rectanglesOverlapWithSpacing(panelRect(a, panelA), panelRect(b, panelB), Math.max(settingsA.interPanelSpacingM, settingsB.interPanelSpacingM), Math.max(settingsA.rowSpacingM, settingsB.rowSpacingM))) return false
+      if (pairwiseSpacingConflict(
+        a,
+        b,
+        panelA,
+        panelB,
+        settingsA,
+        settingsB,
+        surfaceFor?.(a.surfaceId),
+        edgeFor?.(a.surfaceId),
+      )) return false
     }
   }
   return true
@@ -576,7 +763,26 @@ const allocateGeneratedId = (used: ReadonlySet<string>, start: number): { readon
   return { id, nextId: next + 1 }
 }
 
-const validDirection = (direction: unknown): direction is Point2 => isFinitePoint(direction) && Math.hypot(direction.x, direction.y) > 1e-9
+/** Allocate a stable, collision-free group id for a newly generated batch. */
+const allocateGeneratedGroupId = (
+  placements: Readonly<Record<string, PanelPlacement>>,
+  groupSettings: Readonly<Record<string, PanelGroupSettings>>,
+  start: number,
+): string => {
+  const used = new Set<string>(Object.keys(groupSettings))
+  for (const placement of Object.values(placements)) {
+    if (placement.groupId !== undefined) used.add(placement.groupId)
+  }
+  let suffix = Number.isInteger(start) && start > 0 ? start : 1
+  let groupId = `group-${String(suffix)}`
+  while (used.has(groupId)) {
+    suffix += 1
+    groupId = `group-${String(suffix)}`
+  }
+  return groupId
+}
+
+const validDirection = (direction: unknown): direction is Point2 => isFinitePoint(direction) && Math.hypot(direction.x, direction.y) > SURFACE_EDGE_DIRECTION_EPSILON
 const normaliseDirection = (direction: Point2): Point2 => {
   const length = Math.hypot(direction.x, direction.y)
   return { x: direction.x / length, y: direction.y / length }
@@ -607,17 +813,50 @@ const validPointLine = (line: unknown): line is GutterLine => {
   return validDirection(line.direction) && isFinitePoint(line.origin)
 }
 
-const cloneGutters = (gutters: unknown): Readonly<Record<string, SurfaceGutter>> => {
-  const result: Record<string, SurfaceGutter> = {}
+const validGutterType = (value: unknown): value is SurfaceEdgeType | undefined => value === undefined || isSurfaceEdgeType(value)
+const validGutterSide = (value: unknown): value is SurfaceEdgeSide | undefined => value === undefined || isSurfaceEdgeSide(value)
+
+const normaliseSurfaceEdgeMetadata = (value: unknown): SurfaceEdgeMetadata | undefined => {
+  if (!isRecord(value) || !validDirection(value.direction) || !validGutterType(value.type)
+    || !validGutterSide(value.side)
+    || (value.side !== undefined && value.line === undefined)
+    || (value.line !== undefined && !validPointLine(value.line))) return undefined
+  const type: SurfaceEdgeType = value.type === undefined ? 'gutter' : value.type
+  const direction = normaliseDirection(value.direction)
+  const line = value.line
+  return {
+    type,
+    direction,
+    ...(line === undefined ? {} : {
+      line: {
+        origin: clonePoint(line.origin),
+        direction: normaliseDirection(line.direction),
+      },
+    }),
+    ...(value.side === undefined ? {} : { side: value.side }),
+  }
+}
+
+const cloneGutters = (gutters: unknown): Readonly<Record<string, SurfaceGutterOverride>> => {
+  const result: Record<string, SurfaceGutterOverride> = {}
   if (gutters === undefined) return Object.freeze(result)
   const addGutter = (id: unknown, gutter: unknown): void => {
-    if (!validString(id) || !isRecord(gutter)) return
-    if (!validString(id) || id !== gutter.surfaceId || !validDirection(gutter.direction)) return
-    if (gutter.line !== undefined && !validPointLine(gutter.line)) return
+    if (!validString(id)) return
+    if (gutter === null) {
+      result[id] = null
+      return
+    }
+    if (!isRecord(gutter)) return
+    if (!validString(id) || id !== gutter.surfaceId || !validDirection(gutter.direction) || !validGutterType(gutter.type)) return
+    if (!validGutterSide(gutter.side)
+      || (gutter.side !== undefined && gutter.line === undefined)
+      || (gutter.line !== undefined && !validPointLine(gutter.line))) return
     result[id] = deepFreeze({
       surfaceId: id,
+      type: gutter.type ?? 'gutter',
       direction: normaliseDirection(gutter.direction),
       ...(gutter.line === undefined ? {} : { line: deepFreeze({ origin: clonePoint(gutter.line.origin), direction: normaliseDirection(gutter.line.direction) }) }),
+      ...(gutter.side === undefined ? {} : { side: gutter.side }),
     })
   }
   if (isGutterList(gutters)) {
@@ -661,19 +900,26 @@ const isGutterSource = (value: unknown): boolean => {
     && validString(gutter.surfaceId)
     && gutter.surfaceId === (gutter as SurfaceGutter).surfaceId
     && validDirection(gutter.direction)
+    && validGutterType(gutter.type)
+    && validGutterSide(gutter.side)
+    && (gutter.side === undefined || gutter.line !== undefined)
     && (gutter.line === undefined || validPointLine(gutter.line)))
   if (!isRecord(value)) return false
   return Object.entries(value).every(([id, gutter]) => isRecord(gutter)
-    && validString(id)
-    && gutter.surfaceId === id
-    && validDirection(gutter.direction)
-    && (gutter.line === undefined || validPointLine(gutter.line)))
+    ? validString(id)
+      && gutter.surfaceId === id
+      && validDirection(gutter.direction)
+      && validGutterType(gutter.type)
+      && validGutterSide(gutter.side)
+      && (gutter.side === undefined || gutter.line !== undefined)
+      && (gutter.line === undefined || validPointLine(gutter.line))
+    : gutter === null && validString(id))
 }
 
 interface NormalisedContext {
   readonly definitions: Readonly<Record<string, PanelDefinition>>
   readonly surfaces: Readonly<Record<string, SurfaceDescriptor>>
-  readonly gutters: Readonly<Record<string, SurfaceGutter>>
+  readonly gutters: Readonly<Record<string, SurfaceGutterOverride>>
   readonly obstacleSource: ObstacleSource | undefined
   readonly context: PlacementContext
 }
@@ -681,7 +927,7 @@ interface NormalisedContext {
 const contextFromParts = (
   definitions: Readonly<Record<string, PanelDefinition>>,
   surfaces: Readonly<Record<string, SurfaceDescriptor>>,
-  gutters: Readonly<Record<string, SurfaceGutter>>,
+  gutters: Readonly<Record<string, SurfaceGutterOverride>>,
   obstacleSource: ObstacleSource | undefined,
 ): PlacementContext => deepFreeze({
   panels: Object.freeze(Object.values(definitions)),
@@ -724,7 +970,7 @@ export class PlacementStore {
   private contextValue: PlacementContext
   private definitions: Readonly<Record<string, PanelDefinition>>
   private surfaces: Readonly<Record<string, SurfaceDescriptor>>
-  private gutters: Readonly<Record<string, SurfaceGutter>>
+  private gutters: Readonly<Record<string, SurfaceGutterOverride>>
   private obstacleSource: ObstacleSource | undefined
   private state: PlacementState
   private undoStack: PlacementSnapshot[]
@@ -822,6 +1068,74 @@ export class PlacementStore {
   }
 
   /**
+   * Set or remove the selected surface edge. Edge annotations are source
+   * context, not design edits: they notify renderers but deliberately do not
+   * enter placement undo/redo history. Legacy payloads may omit `type`, which
+   * is canonicalised to `gutter` here.
+   */
+  public setSurfaceEdge(surfaceId: unknown, metadata: unknown): boolean {
+    if (!validString(surfaceId) || !this.knownSurface(surfaceId)) return false
+    const nextSource: Record<string, SurfaceGutterOverride> = {}
+    for (const [id, gutter] of Object.entries(this.gutters)) {
+      if (id !== surfaceId) nextSource[id] = gutter
+    }
+    if (metadata !== undefined) {
+      if (!isRecord(metadata)) return false
+      if (metadata.surfaceId !== undefined && metadata.surfaceId !== surfaceId) return false
+      const candidate = normaliseSurfaceEdgeMetadata(metadata)
+      if (candidate === undefined) return false
+      nextSource[surfaceId] = {
+        surfaceId,
+        type: candidate.type,
+        direction: candidate.direction,
+        ...(candidate.line === undefined ? {} : { line: candidate.line }),
+        ...(candidate.side === undefined ? {} : { side: candidate.side }),
+      }
+    } else {
+      // Keep an explicit tombstone so embedded edge metadata cannot silently
+      // reappear after a user clears the selected surface's annotation.
+      nextSource[surfaceId] = null
+    }
+    const next = cloneGutters(nextSource)
+    if (equalValue(this.gutters, next)) return false
+    this.gutters = next
+    this.contextValue = contextFromParts(this.definitions, this.surfaces, this.gutters, this.obstacleSource)
+    this.state = freezeState({ ...this.state })
+    this.notify()
+    return true
+  }
+
+  /** Read a cloned, immutable edge record for a selected surface. */
+  public getSurfaceEdge(surfaceId: unknown): SurfaceGutter | undefined {
+    if (!validString(surfaceId)) return undefined
+    const edge = this.surfaceEdge(surfaceId)
+    if (edge === undefined) return undefined
+    return deepFreeze({
+      surfaceId: edge.surfaceId,
+      type: edge.type ?? 'gutter',
+      direction: { ...edge.direction },
+      ...(edge.line === undefined ? {} : { line: { origin: { ...edge.line.origin }, direction: { ...edge.line.direction } } }),
+      ...(edge.side === undefined ? {} : { side: edge.side }),
+    })
+  }
+
+  /** Human-readable path used by the shell's selected-edge inspector. */
+  public surfaceEdgeSummary(surfaceId: unknown): SurfaceEdgeSummary | undefined {
+    const edge = this.getSurfaceEdge(surfaceId)
+    if (edge === undefined || !validString(surfaceId)) return undefined
+    const type = edge.type ?? 'gutter'
+    return deepFreeze({
+      surfaceId,
+      type,
+      label: edgeLabel(type),
+      path: `Surface ${surfaceId} › ${edgeLabel(type)}`,
+      direction: { ...edge.direction },
+      ...(edge.line === undefined ? {} : { line: { origin: { ...edge.line.origin }, direction: { ...edge.line.direction } } }),
+      ...(edge.side === undefined ? {} : { side: edge.side }),
+    })
+  }
+
+  /**
    * Replace the source/project context. A replacement clears placements,
    * selection, drafts, previews, and undo/redo history and restores default
    * settings. Invalid input is rejected without mutating the current design.
@@ -895,6 +1209,31 @@ export class PlacementStore {
     return this.knownSurface(surfaceId) ? this.surfaces[surfaceId] : undefined
   }
 
+  /** Resolve context metadata while keeping embedded surface edges as a
+   * backwards-compatible fallback for hosts that do not provide `gutters`. */
+  private surfaceEdge(surfaceId: string): SurfaceGutter | undefined {
+    const supplied = this.gutters[surfaceId]
+    if (supplied !== undefined) return supplied === null ? undefined : supplied
+    const embedded = this.surfaces[surfaceId]?.edge
+    if (embedded === undefined) return undefined
+    return {
+      surfaceId,
+      type: embedded.type,
+      direction: { ...embedded.direction },
+      ...(embedded.line === undefined ? {} : {
+        line: {
+          origin: clonePoint(embedded.line.origin),
+          direction: { ...embedded.line.direction },
+        },
+      }),
+      ...(embedded.side === undefined ? {} : { side: embedded.side }),
+    }
+  }
+
+  private surfaceEdgeMetadata(surfaceId: string): SurfaceEdgeMetadata | undefined {
+    return edgeMetadataFromGutter(this.surfaceEdge(surfaceId))
+  }
+
   private settingsFor(groupId?: string): PanelGroupSettings {
     return groupId !== undefined && this.state.groupSettings[groupId] !== undefined
       ? this.state.groupSettings[groupId]
@@ -948,25 +1287,56 @@ export class PlacementStore {
     ignoredIds: ReadonlySet<string> = new Set<string>(),
     settingsOverride?: PanelGroupSettings,
     obstaclesOverride?: readonly RectangularObstacle[],
+    edgeOverride?: SurfaceEdgeMetadata,
+    regionOverride?: SurfaceRegion,
   ): boolean {
     const panel = this.definitions[placement.panelId]
     const surface = this.surface(placement.surfaceId)
     if (!validPanel(panel) || surface === undefined || normalisePlacement(placement) === undefined) return false
     const settings = settingsOverride ?? this.settingsFor(placement.groupId)
     if (!validSettings(settings) || !isValidSurfaceDescriptor(surface)) return false
+    const region = regionOverride ?? surface.region
+    if (!isSurfaceRegion(region) || boundsOfRegion(region) === undefined) return false
+    const edge = edgeOverride ?? edgeMetadataFromGutter(this.surfaceEdge(placement.surfaceId))
+    const axes = edge === undefined ? undefined : deriveSurfaceEdgeAxes(edge, region)
+    const footprint = orientedFootprint(panel, placement.orientation)
     const rectangle = panelRect(placement, panel)
-    if (!rectangleInsideSurfaceRegion(rectangle, surface.region, settings.setbackM)) return false
+    const fits = axes === undefined
+      ? rectangleInsideSurfaceRegion(rectangle, region, settings.setbackM)
+      : orientedCandidateInsideRegion(placement.localCenter, footprint.widthM, footprint.heightM, region, axes, settings.setbackM)
+    if (!fits) return false
     const obstacles = obstaclesOverride ?? this.obstaclesFor(placement.surfaceId)
     if (obstacles === undefined || obstacles.some((obstacle) => !isRectangularObstacle(obstacle))) return false
-    if (obstacles.some((obstacle) => rectanglesOverlap(rectangle, obstacle))) return false
+    const obstacleClearanceM = settings.obstacleClearanceM ?? 0
+    if (axes === undefined) {
+      if (obstacles.some((obstacle) => rectanglesOverlap(rectangle, expandedObstacle(obstacle, obstacleClearanceM)))) return false
+    } else if (obstacles.some((obstacle) => orientedObstacleOverlap(
+      placement.localCenter,
+      footprint.widthM,
+      footprint.heightM,
+      expandedObstacle(obstacle, obstacleClearanceM),
+      axes,
+    ))) return false
+    // A generated request may intentionally target a strict subregion of the
+    // surface. Use that same region when resolving ridge/interior edge axes
+    // for pairwise checks, otherwise preview and confirm can disagree even
+    // though the candidate itself was generated from the request region.
+    const pairwiseSurface = regionOverride === undefined ? surface : { ...surface, region }
     for (const existing of Object.values(this.state.placements)) {
       if (ignoredIds.has(existing.id) || existing.id === placement.id || existing.surfaceId !== placement.surfaceId) continue
       const existingPanel = this.definitions[existing.panelId]
       if (!validPanel(existingPanel)) return false
       const existingSettings = this.settingsFor(existing.groupId)
-      const horizontal = Math.max(settings.interPanelSpacingM, existingSettings.interPanelSpacingM)
-      const vertical = Math.max(settings.rowSpacingM, existingSettings.rowSpacingM)
-      if (rectanglesOverlapWithSpacing(rectangle, panelRect(existing, existingPanel), horizontal, vertical)) return false
+      if (pairwiseSpacingConflict(
+        placement,
+        existing,
+        panel,
+        existingPanel,
+        settings,
+        existingSettings,
+        pairwiseSurface,
+        edge,
+      )) return false
     }
     return true
   }
@@ -1144,6 +1514,24 @@ export class PlacementStore {
     return this.selectPanels(ids, additive)
   }
 
+  /**
+   * Select panels touched by a perspective-correct surface-local polygon.
+   * Screen-space drag rectangles become quadrilaterals when projected onto a
+   * tilted/perspective surface, so reducing them to an axis-aligned local
+   * rectangle can miss every panel in an otherwise obvious box.
+   */
+  public selectByPolygon(polygon: unknown, surfaceId?: unknown, additive = false): readonly string[] {
+    if (typeof additive !== 'boolean' || (surfaceId !== undefined && (!validString(surfaceId) || !this.knownSurface(surfaceId)))) return this.state.selectedIds
+    if (!isFiniteSelectionPolygon(polygon)) return this.state.selectedIds
+    const selectedSurface = surfaceId
+    const ids = Object.values(this.state.placements).filter((placement) => {
+      if (selectedSurface !== undefined && placement.surfaceId !== selectedSurface) return false
+      const panel = this.definitions[placement.panelId]
+      return validPanel(panel) && polygonOverlap(polygon, rectangleCorners(panelRect(placement, panel)))
+    }).map((placement) => placement.id)
+    return this.selectPanels(ids, additive)
+  }
+
   public moveSelected(delta: Point2): boolean { return this.moveGroup(delta) }
 
   public moveGroup(delta: Point2, ids?: readonly string[]): boolean
@@ -1172,7 +1560,13 @@ export class PlacementStore {
         candidates.push(candidate)
         moved[id] = candidate
       }
-      if (!pairwiseSpacingValid(candidates, this.definitions, (groupId) => this.settingsFor(groupId))) return undefined
+      if (!pairwiseSpacingValid(
+        candidates,
+        this.definitions,
+        (groupId) => this.settingsFor(groupId),
+        (surfaceId) => this.surface(surfaceId),
+        (surfaceId) => this.surfaceEdgeMetadata(surfaceId),
+      )) return undefined
       return { ...state, placements: moved, selectedIds: [...selected] }
     })
   }
@@ -1192,8 +1586,37 @@ export class PlacementStore {
         changed[id] = candidate
         candidates.push(candidate)
       }
-      if (!pairwiseSpacingValid(candidates, this.definitions, (groupId) => this.settingsFor(groupId))) return undefined
-      return { ...state, placements: changed, settings: ids.length === state.selectedIds.length ? { ...state.settings, orientation } : state.settings }
+      if (!pairwiseSpacingValid(
+        candidates,
+        this.definitions,
+        (groupId) => this.settingsFor(groupId),
+        (surfaceId) => this.surface(surfaceId),
+        (surfaceId) => this.surfaceEdgeMetadata(surfaceId),
+      )) return undefined
+      const selectedIds = [...selected]
+      const selectedGroupId = selectedIds.length === state.selectedIds.length
+        ? editableGroupIdFor({ placements: state.placements, selectedIds })
+        : undefined
+      if (selectedGroupId !== undefined) {
+        const groupSettings = this.settingsFor(selectedGroupId)
+        return {
+          ...state,
+          placements: changed,
+          selectedIds,
+          groupSettings: {
+            ...state.groupSettings,
+            [selectedGroupId]: { ...groupSettings, orientation },
+          },
+        }
+      }
+      // Preserve the legacy global-default behaviour when no editable group
+      // exists (ungrouped or mixed selections).
+      return {
+        ...state,
+        placements: changed,
+        selectedIds,
+        ...(selectedIds.length === state.selectedIds.length ? { settings: { ...state.settings, orientation } } : {}),
+      }
     })
   }
 
@@ -1237,14 +1660,15 @@ export class PlacementStore {
     return this.setActiveSurfaces([...ids])
   }
 
-  public beginArrayDrag(panelId: unknown, surfaceId: unknown, start: unknown, orientation: unknown = this.state.settings.orientation, groupId?: unknown): boolean {
+  public beginArrayDrag(panelId: unknown, surfaceId: unknown, start: unknown, orientation?: unknown, groupId?: unknown): boolean {
     if (!validString(panelId) || (surfaceId !== undefined && !validString(surfaceId)) || !isFinitePoint(start)
-      || !isOrientation(orientation) || (groupId !== undefined && !validString(groupId))) return false
+      || (groupId !== undefined && !validString(groupId))) return false
     const targetSurface = surfaceId ?? this.state.activeSurfaceId
     if (targetSurface === undefined || !this.knownSurface(targetSurface) || !validPanel(this.definitions[panelId])) return false
     const selectedPanel = panelId
-    const selectedOrientation = orientation
     const selectedGroup = groupId
+    const selectedOrientation = orientation === undefined ? this.settingsFor(selectedGroup).orientation : orientation
+    if (!isOrientation(selectedOrientation)) return false
     return this.update((state) => ({ ...state, arrayDrag: { panelId: selectedPanel, surfaceId: targetSurface, start: clonePoint(start), orientation: selectedOrientation, ...(selectedGroup === undefined ? {} : { groupId: selectedGroup }) } }), false)
   }
 
@@ -1264,29 +1688,41 @@ export class PlacementStore {
     if (finish === undefined || !isFinitePoint(finish)) return []
     const panel = this.definitions[draft.panelId]
     if (!validPanel(panel)) return []
-    const settings = { ...this.settingsFor(draft.groupId), orientation: draft.orientation }
+    // A drag is a generated batch. Keep all placements in that batch under a
+    // deterministic group id even when the caller did not select an existing
+    // group, while preserving explicit group ids supplied by hosts.
+    const batchGroupId = draft.groupId
+      ?? allocateGeneratedGroupId(this.state.placements, this.state.groupSettings, this.state.nextId)
+    const settings = { ...this.settingsFor(batchGroupId), orientation: draft.orientation }
     const request: AutoFillRequest = {
       panelId: draft.panelId,
       surfaceId: draft.surfaceId,
       region: { x: Math.min(draft.start.x, finish.x), y: Math.min(draft.start.y, finish.y), width: Math.abs(finish.x - draft.start.x), height: Math.abs(finish.y - draft.start.y) },
       obstacles: this.obstaclesFor(draft.surfaceId) ?? [],
       settings,
-      ...(draft.groupId === undefined ? {} : { groupId: draft.groupId }),
+      groupId: batchGroupId,
+      ...(this.surfaceEdgeMetadata(draft.surfaceId) === undefined ? {} : { edge: this.surfaceEdgeMetadata(draft.surfaceId) }),
     }
     const generated = generateAutoFill(panel, request)
     // Candidates were generated from this drag's settings (including its
     // group-specific spacing), so validate the batch against that same
     // settings snapshot rather than a later/global settings mutation.
     const requestSettingsFor = (groupId: string | undefined): PanelGroupSettings =>
-      groupId === draft.groupId ? settings : this.settingsFor(groupId)
+      groupId === batchGroupId ? settings : this.settingsFor(groupId)
     const created: PanelPlacement[] = []
     const usedIds = new Set(Object.keys(this.state.placements))
     let nextId = this.state.nextId
     for (const candidate of generated) {
       const allocation = allocateGeneratedId(usedIds, nextId)
-      const placement = this.makePlacement({ panelId: draft.panelId, surfaceId: draft.surfaceId, localCenter: candidate.localCenter, orientation: candidate.orientation, clearanceM: candidate.clearanceM, tiltDeg: candidate.tiltDeg, groupId: candidate.groupId }, allocation.id)
-      if (placement !== undefined && this.canPlace(placement, new Set(), settings, request.obstacles)
-        && pairwiseSpacingValid([...created, placement], this.definitions, requestSettingsFor)) {
+      const placement = this.makePlacement({ panelId: draft.panelId, surfaceId: draft.surfaceId, localCenter: candidate.localCenter, orientation: candidate.orientation, clearanceM: candidate.clearanceM, tiltDeg: candidate.tiltDeg, groupId: candidate.groupId ?? batchGroupId }, allocation.id)
+      if (placement !== undefined && this.canPlace(placement, new Set(), settings, request.obstacles, request.edge, request.region)
+        && pairwiseSpacingValid(
+          [...created, placement],
+          this.definitions,
+          requestSettingsFor,
+          (surfaceId) => this.surface(surfaceId),
+          (surfaceId) => surfaceId === request.surfaceId ? request.edge ?? this.surfaceEdgeMetadata(surfaceId) : this.surfaceEdgeMetadata(surfaceId),
+        )) {
         created.push(placement)
         usedIds.add(allocation.id)
         nextId = allocation.nextId
@@ -1335,7 +1771,13 @@ export class PlacementStore {
       proposed.push(target)
       if (!this.canPlace(target, new Set([anchorId, ...ordered]), settings)) invalidIds.push(id)
     }
-    if (!pairwiseSpacingValid([anchor, ...proposed], this.definitions, (groupId) => this.settingsFor(groupId))) {
+    if (!pairwiseSpacingValid(
+      [anchor, ...proposed],
+      this.definitions,
+      (groupId) => this.settingsFor(groupId),
+      (surfaceId) => this.surface(surfaceId),
+      (surfaceId) => this.surfaceEdgeMetadata(surfaceId),
+    )) {
       for (const placement of proposed) if (!invalidIds.includes(placement.id)) invalidIds.push(placement.id)
     }
     const preview: AlignPreview = {
@@ -1356,7 +1798,13 @@ export class PlacementStore {
     const anchor = this.state.placements[preview.anchorId]
     if (anchor === undefined
       || preview.placements.some((placement) => !this.canPlace(placement, ignored))
-      || !pairwiseSpacingValid([anchor, ...preview.placements], this.definitions, (groupId) => this.settingsFor(groupId))) return false
+      || !pairwiseSpacingValid(
+        [anchor, ...preview.placements],
+        this.definitions,
+        (groupId) => this.settingsFor(groupId),
+        (surfaceId) => this.surface(surfaceId),
+        (surfaceId) => this.surfaceEdgeMetadata(surfaceId),
+      )) return false
     return this.update((state) => ({
       ...state,
       placements: { ...state.placements, ...Object.fromEntries(preview.placements.map((placement) => [placement.id, placement])) },
@@ -1376,24 +1824,30 @@ export class PlacementStore {
   public previewAutoFill(requestOrOptions: unknown): AutoFillPreview | undefined {
     const request = this.normaliseAutoFillRequest(requestOrOptions)
     if (request === undefined) return undefined
-    const panel = this.definitions[request.panelId]
+    // Auto-fill is also a generated batch. Assigning the id at preview time
+    // keeps preview and confirmation in lockstep and makes repeated previews
+    // deterministic without requiring callers to know the id format.
+    const previewRequest: AutoFillRequest = request.groupId === undefined
+      ? { ...request, groupId: allocateGeneratedGroupId(this.state.placements, this.state.groupSettings, this.state.nextId) }
+      : request
+    const panel = this.definitions[previewRequest.panelId]
     if (!validPanel(panel)) return undefined
-    const generated = generateAutoFill(panel, request)
+    const generated = generateAutoFill(panel, previewRequest)
     const candidates = generated.filter((candidate) => {
       const temporary: PanelPlacement = {
         id: `preview-${candidate.id}`,
-        panelId: request.panelId,
-        surfaceId: request.surfaceId,
+        panelId: previewRequest.panelId,
+        surfaceId: previewRequest.surfaceId,
         localCenter: candidate.localCenter,
         orientation: candidate.orientation,
         clearanceM: candidate.clearanceM,
         tiltDeg: candidate.tiltDeg,
         ...(candidate.groupId === undefined ? {} : { groupId: candidate.groupId }),
       }
-      return this.canPlace(temporary, new Set(), request.settings, request.obstacles)
+      return this.canPlace(temporary, new Set(), previewRequest.settings, previewRequest.obstacles, previewRequest.edge, previewRequest.region)
     })
     const preview: AutoFillPreview = {
-      request,
+      request: previewRequest,
       candidates,
       totalWattageW: candidates.length * panel.wattageW,
       totalKwp: candidates.length * panel.wattageW / 1000,
@@ -1412,12 +1866,15 @@ export class PlacementStore {
     const surface = this.surface(surfaceId)
     const regionValue = input.region ?? surface?.region
     if (!isSurfaceRegion(regionValue) || boundsOfRegion(regionValue) === undefined) return undefined
-    const explicit = input.region !== undefined && input.settings !== undefined && input.obstacles !== undefined
-    const settings = explicit
-      ? mergeSettings(this.state.settings, input.settings)
-      : mergeSettings(this.settingsFor(groupId), input.settings)
+    const settings = mergeSettings(this.settingsFor(groupId), input.settings)
     const obstaclesValue = input.obstacles ?? this.obstaclesFor(surfaceId)
     if (settings === undefined || !Array.isArray(obstaclesValue) || !obstaclesValue.every(isRectangularObstacle)) return undefined
+    const edgeValue = input.edge
+    const edge = edgeValue === undefined
+      ? this.surfaceEdge(surfaceId)
+      : normaliseSurfaceEdgeMetadata(edgeValue)
+    if (edgeValue !== undefined && edge === undefined) return undefined
+    const normalisedEdge = edge === undefined ? undefined : normaliseSurfaceEdgeMetadata(edge)
     return {
       panelId,
       surfaceId,
@@ -1425,6 +1882,7 @@ export class PlacementStore {
       obstacles: obstaclesValue.map(cloneObstacle),
       settings,
       ...(groupId === undefined ? {} : { groupId }),
+      ...(normalisedEdge === undefined ? {} : { edge: normalisedEdge }),
     }
   }
 
@@ -1444,7 +1902,16 @@ export class PlacementStore {
       rectangle: candidateRectangle(candidate, panel),
       settings: requestSettingsFor(candidate.groupId),
     }))
-    const spacingIndex = buildSpacingIndex(cachedCandidates)
+    const previewUsesOrientedEdge = preview.request.edge !== undefined
+      || this.surfaceEdgeMetadata(preview.request.surfaceId) !== undefined
+    // Axis-aligned rectangles are only a valid broad phase for legacy
+    // payloads. Edge-aware previews use the exact oriented pairwise path so
+    // confirmation cannot reject a candidate that preview accepted.
+    const spacingIndex = previewUsesOrientedEdge ? undefined : buildSpacingIndex(cachedCandidates)
+    const edgeForPreview = (surfaceId: string): SurfaceEdgeMetadata | undefined =>
+      surfaceId === preview.request.surfaceId
+        ? preview.request.edge ?? this.surfaceEdgeMetadata(surfaceId)
+        : this.surfaceEdgeMetadata(surfaceId)
     for (const cached of cachedCandidates) {
       const candidate = cached.candidate
       const allocation = allocateGeneratedId(usedIds, nextId)
@@ -1452,8 +1919,14 @@ export class PlacementStore {
       const rectangle = cached.rectangle
       const spacingConflict = placement !== undefined && rectangle !== undefined && spacingIndex !== undefined
         ? spacingIndexHasConflict(spacingIndex, placement, rectangle, cached.settings)
-        : placement !== undefined && !pairwiseSpacingValid([...created, placement], this.definitions, requestSettingsFor)
-      if (placement !== undefined && this.canPlace(placement, ignoredIds, preview.request.settings, preview.request.obstacles)
+        : placement !== undefined && !pairwiseSpacingValid(
+          [...created, placement],
+          this.definitions,
+          requestSettingsFor,
+          (surfaceId) => this.surface(surfaceId),
+          edgeForPreview,
+        )
+      if (placement !== undefined && this.canPlace(placement, ignoredIds, preview.request.settings, preview.request.obstacles, preview.request.edge, preview.request.region)
         && !spacingConflict) {
         created.push(placement)
         usedIds.add(allocation.id)
@@ -1509,7 +1982,7 @@ export class PlacementStore {
     const surface = placement === undefined ? undefined : this.surface(placement.surfaceId)
     if (placement === undefined || !validPanel(panel) || surface === undefined) return undefined
     const worldCenter = pointOnSurface(placement.localCenter, surface.frame, placement.clearanceM)
-    const gutter = this.gutters[surface.id]
+    const gutter = this.surfaceEdge(surface.id)
     const gutterDirection = gutter?.direction ?? { x: 1, y: 0 }
     return deepFreeze({ placement: clonePlacement(placement), footprint: orientedFootprint(panel, placement.orientation), worldCenter, normal: { ...surface.frame.normal }, gutterDirection: { ...gutterDirection } })
   }
@@ -1518,11 +1991,12 @@ export class PlacementStore {
     if (!validString(surfaceId)) return undefined
     const surface = this.surface(surfaceId)
     if (surface === undefined || !isOrientation(orientation)) return undefined
-    const gutter = this.gutters[surfaceId]
+    const gutter = this.surfaceEdge(surfaceId)
     return deepFreeze({
       surfaceId,
       direction: { ...(gutter?.direction ?? { x: 1, y: 0 }) },
       ...(gutter?.line === undefined ? {} : { line: { origin: clonePoint(gutter.line.origin), direction: { ...gutter.line.direction } } }),
+      ...(gutter?.side === undefined ? {} : { side: gutter.side }),
       orientation,
       azimuthDeg: surface.azimuthDeg,
     })
@@ -1538,6 +2012,7 @@ export type PlacementAction =
   | { readonly type: 'delete'; readonly ids?: readonly string[] }
   | { readonly type: 'set-settings'; readonly settings: Partial<PanelGroupSettings> }
   | { readonly type: 'set-group-settings'; readonly groupId: string; readonly settings: Partial<PanelGroupSettings> }
+  | { readonly type: 'set-surface-edge'; readonly surfaceId: string; readonly edge?: SurfaceEdgeMetadata }
   | { readonly type: 'set-orientation'; readonly orientation: Orientation; readonly ids?: readonly string[] }
   | { readonly type: 'move'; readonly delta: Point2 }
   | { readonly type: 'undo' }
@@ -1555,6 +2030,7 @@ export function dispatchPlacementAction(store: PlacementStore, action: unknown):
     case 'delete': return store.deletePanels(action.ids) > 0
     case 'set-settings': return store.setSettings(action.settings)
     case 'set-group-settings': return store.setGroupSettings(action.groupId, action.settings)
+    case 'set-surface-edge': return store.setSurfaceEdge(action.surfaceId, action.edge)
     case 'set-orientation': return store.setOrientation(action.orientation, action.ids)
     case 'move': return isFinitePoint(action.delta) && store.moveSelected(action.delta)
     case 'undo': return store.undo()

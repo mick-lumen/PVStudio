@@ -1,5 +1,5 @@
 /// <reference lib="webworker" />
-import { parseObjDocument, type ObjDocumentBounds } from './objParser'
+import { exactObjArrayBuffer, parseObjDocument, type ObjDocumentBounds, type ObjDocumentSourceCounts } from './objParser'
 
 interface WorkerRequest {
   readonly type: 'parse'
@@ -26,6 +26,8 @@ interface WorkerResponse {
   readonly normals?: ArrayBuffer
   readonly normalsLength?: number
   readonly bounds?: ObjDocumentBounds
+  readonly referencedBounds?: ObjDocumentBounds
+  readonly sourceCounts?: ObjDocumentSourceCounts
   readonly groups?: readonly WorkerGroup[]
   readonly message?: string
 }
@@ -36,6 +38,7 @@ interface WorkerScope {
 }
 
 const scope = globalThis as unknown as WorkerScope
+
 scope.onmessage = (event): void => {
   try {
     const source = new TextDecoder().decode(event.data.buffer)
@@ -47,16 +50,16 @@ scope.onmessage = (event): void => {
     const groups = parsed.groups.map((group) => ({
       name: group.name,
       materialName: group.materialName,
-      indices: group.indices.buffer as ArrayBuffer,
+      indices: exactObjArrayBuffer(group.indices),
       indicesLength: group.indices.length,
-      uvIndices: group.uvIndices.buffer as ArrayBuffer,
+      uvIndices: exactObjArrayBuffer(group.uvIndices),
       uvIndicesLength: group.uvIndices.length,
-      normalIndices: group.normalIndices.buffer as ArrayBuffer,
+      normalIndices: exactObjArrayBuffer(group.normalIndices),
       normalIndicesLength: group.normalIndices.length,
     }))
-    const positions = parsed.positions.buffer as ArrayBuffer
-    const texcoords = parsed.texcoords.buffer as ArrayBuffer
-    const normals = parsed.normals.buffer as ArrayBuffer
+    const positions = exactObjArrayBuffer(parsed.positions)
+    const texcoords = exactObjArrayBuffer(parsed.texcoords)
+    const normals = exactObjArrayBuffer(parsed.normals)
     const transfer: Transferable[] = [positions, texcoords, normals, ...groups.flatMap((group) => [group.indices, group.uvIndices, group.normalIndices])]
     scope.postMessage({
       type: 'result',
@@ -67,6 +70,8 @@ scope.onmessage = (event): void => {
       normals,
       normalsLength: parsed.normals.length,
       bounds: parsed.bounds,
+      referencedBounds: parsed.referencedBounds,
+      sourceCounts: parsed.sourceCounts,
       groups,
     }, transfer)
   } catch (error) {

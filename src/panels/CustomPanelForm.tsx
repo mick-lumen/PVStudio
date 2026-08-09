@@ -207,17 +207,31 @@ export function CustomPanelForm({ onSubmit, onCancel, existingPanelIds = [], ini
           {field('efficiencyPercent', 'Efficiency (%)', 'number', 'e.g. 22.5')}
           <label className="custom-panel-form__field" htmlFor="custom-panel-cellType">
             <span>Cell technology</span>
-            <select id="custom-panel-cellType" name="cellType" value={draft.cellType} onChange={update} aria-invalid={errors.cellType !== undefined}>
+            <select
+              id="custom-panel-cellType"
+              name="cellType"
+              value={draft.cellType}
+              onChange={update}
+              aria-invalid={errors.cellType !== undefined}
+              aria-describedby={errors.cellType === undefined ? undefined : 'custom-panel-cellType-error'}
+            >
               {CELL_TYPES.map((cellType) => <option key={cellType} value={cellType}>{cellType}</option>)}
             </select>
-            {errors.cellType === undefined ? null : <small className="custom-panel-form__error">{errors.cellType}</small>}
+            {errors.cellType === undefined ? null : <small id="custom-panel-cellType-error" role="alert" className="custom-panel-form__error">{errors.cellType}</small>}
           </label>
           <label className="custom-panel-form__field" htmlFor="custom-panel-frameColor">
             <span>Frame colour</span>
-            <select id="custom-panel-frameColor" name="frameColor" value={draft.frameColor} onChange={update} aria-invalid={errors.frameColor !== undefined}>
+            <select
+              id="custom-panel-frameColor"
+              name="frameColor"
+              value={draft.frameColor}
+              onChange={update}
+              aria-invalid={errors.frameColor !== undefined}
+              aria-describedby={errors.frameColor === undefined ? undefined : 'custom-panel-frameColor-error'}
+            >
               {FRAME_COLORS.map((frameColor) => <option key={frameColor} value={frameColor}>{frameColor}</option>)}
             </select>
-            {errors.frameColor === undefined ? null : <small className="custom-panel-form__error">{errors.frameColor}</small>}
+            {errors.frameColor === undefined ? null : <small id="custom-panel-frameColor-error" role="alert" className="custom-panel-form__error">{errors.frameColor}</small>}
           </label>
         </div>
       </fieldset>

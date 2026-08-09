@@ -13,6 +13,11 @@ export type {
   Rect,
   RectangularObstacle,
   SurfaceDescriptor,
+  SurfaceEdge,
+  SurfaceEdgeLine,
+  SurfaceEdgeMetadata,
+  SurfaceEdgeSide,
+  SurfaceEdgeType,
   SurfaceFaceRef,
   SurfaceFrame,
   SurfaceNormal,
@@ -20,7 +25,7 @@ export type {
   SurfaceSelection,
 } from './types'
 
-export { DEFAULT_PANEL_GROUP_SETTINGS } from './types'
+export { DEFAULT_PANEL_GROUP_SETTINGS, SURFACE_EDGE_DIRECTION_EPSILON } from './types'
 
 export {
   assertFiniteNumber,
@@ -36,6 +41,8 @@ export {
   createPolygon,
   createRect,
   createRectangularObstacle,
+  createSurfaceEdge,
+  createSurfaceEdgeMetadata,
   createSurfaceDescriptor,
   createSurfaceFaceRef,
   createSurfaceFrame,
@@ -58,6 +65,11 @@ export {
   isRect,
   isRectangularObstacle,
   isSurfaceDescriptor,
+  isSurfaceEdge,
+  isSurfaceEdgeLine,
+  isSurfaceEdgeMetadata,
+  isSurfaceEdgeSide,
+  isSurfaceEdgeType,
   isSurfaceFaceRef,
   isSurfaceFrame,
   isSurfaceNormal,

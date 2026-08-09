@@ -3,6 +3,8 @@ import type {
   PanelDefinition,
   PanelPlacement,
   SurfaceDescriptor,
+  SurfaceEdge,
+  SurfaceEdgeMetadata,
 } from '../core'
 import { isAutoFillCandidate, isPanelPlacement } from '../core'
 import { computePanelPose, type PanelPose } from './math'
@@ -19,6 +21,10 @@ export type DefinitionCollection =
 export type SurfaceCollection =
   | readonly SurfaceDescriptor[]
   | Readonly<Record<string, SurfaceDescriptor>>
+
+export type SurfaceEdgeCollection =
+  | readonly SurfaceEdge[]
+  | Readonly<Record<string, SurfaceEdge | null>>
 
 /** Partial catalogue visual metadata keyed by canonical panel id. */
 export type PanelVisualCollection = Readonly<Record<string, Partial<PanelVisualProperties>>>
@@ -55,6 +61,8 @@ export interface BuildPanelRenderItemsOptions {
   readonly placements?: readonly PanelPlacement[]
   readonly panelDefinitions: DefinitionCollection
   readonly surfaces: SurfaceCollection
+  /** Optional typed roof-edge metadata keyed by surface id. */
+  readonly surfaceEdges?: SurfaceEdgeCollection
   readonly panelVisuals?: PanelVisualCollection
   readonly selectedIds?: readonly string[]
   readonly draggingIds?: readonly string[]
@@ -69,6 +77,13 @@ const collectionMap = <T extends { readonly id: string }>(collection: readonly T
   if (isArrayCollection(collection)) {
     return Object.fromEntries(collection.map((entry) => [entry.id, entry]))
   }
+  return collection
+}
+
+const isSurfaceEdgeList = (value: SurfaceEdgeCollection): value is readonly SurfaceEdge[] => Array.isArray(value)
+
+const surfaceEdgeMap = (collection: SurfaceEdgeCollection): Readonly<Record<string, SurfaceEdge | null>> => {
+  if (isSurfaceEdgeList(collection)) return Object.fromEntries(collection.map((edge) => [edge.surfaceId, edge]))
   return collection
 }
 
@@ -162,6 +177,7 @@ const appendItem = (
   panel: PanelDefinition | undefined,
   surface: SurfaceDescriptor | undefined,
   panelVisuals: PanelVisualCollection | undefined,
+  surfaceEdge: SurfaceEdgeMetadata | null | undefined,
   state: PanelVisualState,
   source: PanelRenderItem['source'],
   interactive: boolean,
@@ -175,7 +191,7 @@ const appendItem = (
     placement,
     panel,
     surface,
-    pose: computePanelPose(panel, surface, placement),
+    pose: computePanelPose(panel, surface, placement, surfaceEdge),
     visuals,
     cellColumns: grid.columns,
     cellRows: grid.rows,
@@ -193,6 +209,7 @@ const appendItem = (
 export function buildPanelRenderItems(options: BuildPanelRenderItemsOptions): readonly PanelRenderItem[] {
   const panels = collectionMap(options.panelDefinitions)
   const surfaces = collectionMap(options.surfaces)
+  const surfaceEdges = options.surfaceEdges === undefined ? {} : surfaceEdgeMap(options.surfaceEdges)
   const selected = ids(options.selectedIds)
   const dragging = ids(options.draggingIds)
   const result: PanelRenderItem[] = []
@@ -201,13 +218,15 @@ export function buildPanelRenderItems(options: BuildPanelRenderItemsOptions): re
     if (!validPlacement(placement)) continue
     if (seen.has(placement.id)) continue
     const state: PanelVisualState = dragging.has(placement.id) ? 'ghost' : selected.has(placement.id) ? 'selected' : 'placed'
-    appendItem(result, placement, panels[placement.panelId], surfaces[placement.surfaceId], options.panelVisuals, state, 'placement', true)
+    const surface = surfaces[placement.surfaceId]
+    appendItem(result, placement, panels[placement.panelId], surface, options.panelVisuals, surface === undefined ? undefined : surfaceEdges[surface.id], state, 'placement', true)
     if (result[result.length - 1]?.id === placement.id) seen.add(placement.id)
   }
   for (const placement of options.ghostPlacements ?? []) {
     if (!validPlacement(placement)) continue
     if (seen.has(placement.id)) continue
-    appendItem(result, placement, panels[placement.panelId], surfaces[placement.surfaceId], options.panelVisuals, 'ghost', 'placement', true)
+    const surface = surfaces[placement.surfaceId]
+    appendItem(result, placement, panels[placement.panelId], surface, options.panelVisuals, surface === undefined ? undefined : surfaceEdges[surface.id], 'ghost', 'placement', true)
     if (result[result.length - 1]?.id === placement.id) seen.add(placement.id)
   }
   const preview = options.autoFillPreview
@@ -227,7 +246,10 @@ export function buildPanelRenderItems(options: BuildPanelRenderItemsOptions): re
         tiltDeg: candidate.tiltDeg,
         ...(candidate.groupId === undefined ? {} : { groupId: candidate.groupId }),
       }
-      appendItem(result, placement, panel, surface, options.panelVisuals, 'ghost', 'preview', options.interactivePreview ?? false)
+      const surfaceEdge = preview.request.edge === undefined
+        ? (surface === undefined ? undefined : surfaceEdges[surface.id])
+        : preview.request.edge
+      appendItem(result, placement, panel, surface, options.panelVisuals, surfaceEdge, 'ghost', 'preview', options.interactivePreview ?? false)
       if (result[result.length - 1]?.id === candidate.id) seen.add(candidate.id)
     }
   }

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { parseObjDocument, parseObjDocumentAsync } from './objParser'
+import { exactObjArrayBuffer, parseObjDocument, parseObjDocumentAsync } from './objParser'
 
 describe('non-blocking OBJ parser', () => {
   it('triangulates polygons, resolves negative indices, and groups materials', () => {
@@ -18,6 +18,13 @@ describe('non-blocking OBJ parser', () => {
     expect(parsed.groups).toHaveLength(2)
     expect(parsed.groups[0]?.indices).toHaveLength(6)
     expect(parsed.groups[1]?.indices).toEqual(new Uint32Array([0, 1, 2]))
+    expect(parsed.sourceCounts).toEqual({
+      vertexCount: 4,
+      texcoordCount: 0,
+      normalCount: 0,
+      polygonCount: 3,
+      cornerCount: 9,
+    })
   })
 
   it('preserves texture and normal streams, including negative corner indices', () => {
@@ -73,5 +80,46 @@ describe('non-blocking OBJ parser', () => {
     expect(timer.mock.calls.length + channel.mock.calls.length).toBeGreaterThan(0)
     timer.mockRestore()
     channel.mockRestore()
+  })
+
+  it('returns exact-length typed-array backing buffers for worker transfer', () => {
+    const parsed = parseObjDocument([
+      'v 0 0 0',
+      'v 1 0 0',
+      'v 0 0 1',
+      'vt 0 0',
+      'vt 1 0',
+      'vt 0 1',
+      'f 1/1 2/2 3/3',
+    ].join('\n'), undefined, false)
+    const streams: readonly ArrayLike<number>[] = [
+      parsed.positions,
+      parsed.texcoords,
+      parsed.normals,
+      parsed.groups[0]?.indices ?? new Uint32Array(),
+      parsed.groups[0]?.uvIndices ?? new Int32Array(),
+      parsed.groups[0]?.normalIndices ?? new Int32Array(),
+    ]
+    for (const stream of streams) {
+      if (!(stream instanceof Float32Array || stream instanceof Uint32Array || stream instanceof Int32Array)) continue
+      expect(stream.byteOffset).toBe(0)
+      expect(stream.buffer.byteLength).toBe(stream.byteLength)
+    }
+    const subarray = parsed.positions.subarray(3)
+    const transferred = exactObjArrayBuffer(subarray)
+    expect(transferred.byteLength).toBe(subarray.byteLength)
+  })
+
+  it('keeps source bounds separate from positions referenced by faces', () => {
+    const parsed = parseObjDocument([
+      'v 0 0 0',
+      'v 1 0 0',
+      'v 0 0 1',
+      'v 1000 1000 1000',
+      'f 1 2 3',
+    ].join('\n'), undefined, false)
+
+    expect(parsed.bounds.max).toEqual({ x: 1000, y: 1000, z: 1000 })
+    expect(parsed.referencedBounds?.max).toEqual({ x: 1, y: 0, z: 1 })
   })
 })

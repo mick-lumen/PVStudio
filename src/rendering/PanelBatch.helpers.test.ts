@@ -2,8 +2,12 @@ import * as THREE from 'three'
 import { describe, expect, it, vi } from 'vitest'
 import type { PanelDefinition, PanelPlacement, Point3, SurfaceDescriptor } from '../core'
 import { buildPanelRenderItems } from './layout'
+import { NO_PANEL_RAYCAST, PANEL_CELL_INTERACTION_PROPS } from './PanelBatch'
 import {
+  changedPanelInstanceIndices,
   compactPanelItemsByState,
+  createCompactInstanceLookup,
+  expandSphereBySphere,
   finishPanelDrag,
   panelInstanceIndex,
   PANEL_VISUAL_STATE_ORDER,
@@ -74,6 +78,34 @@ describe('panel batch lifecycle helpers', () => {
     expect(pointerCaptureTarget(objectTarget as unknown as EventTarget)).toBeNull()
   })
 
+  it('prefers Fiber synthetic capture methods and keeps a native fallback', () => {
+    const synthetic = {
+      setPointerCapture: vi.fn(),
+      releasePointerCapture: vi.fn(),
+    }
+    const native = {
+      setPointerCapture: vi.fn(),
+      releasePointerCapture: vi.fn(),
+    }
+
+    const syntheticTarget = pointerCaptureTarget(synthetic)
+    syntheticTarget?.setPointerCapture?.(7)
+    syntheticTarget?.releasePointerCapture?.(7)
+    expect(synthetic.setPointerCapture).toHaveBeenCalledWith(7)
+    expect(synthetic.releasePointerCapture).toHaveBeenCalledWith(7)
+    expect(native.setPointerCapture).not.toHaveBeenCalled()
+
+    const nativeTarget = pointerCaptureTarget(native)
+    nativeTarget?.setPointerCapture?.(11)
+    nativeTarget?.releasePointerCapture?.(11)
+    expect(native.setPointerCapture).toHaveBeenCalledWith(11)
+    expect(native.releasePointerCapture).toHaveBeenCalledWith(11)
+  })
+
+  it('keeps cell meshes visual-only and outside the raycast list', () => {
+    expect(PANEL_CELL_INTERACTION_PROPS.raycast).toBe(NO_PANEL_RAYCAST)
+  })
+
   it('compacts 500 all-placed panels to 11 meshes and 150,000 box triangles', () => {
     const placements = Array.from({ length: 500 }, (_, index) => placement(`panel-${String(index)}`))
     const items = buildPanelRenderItems({ placements, panelDefinitions: [panel], surfaces: [surface] })
@@ -141,6 +173,40 @@ describe('panel batch lifecycle helpers', () => {
     expect(shrunk[0]?.length).toBe(500)
     expect(grown[0]?.[511]?.id).toBe('grown-511')
     expect(shrunk[0]?.[499]?.id).toBe('grown-499')
+  })
+
+  it('resolves dragged ids in O(1) compact state lookups and rewrites only moved slots', () => {
+    const initial = buildPanelRenderItems({
+      placements: Array.from({ length: 500 }, (_, index) => placement(`panel-${String(index)}`, { x: index, y: 1 })),
+      panelDefinitions: [panel],
+      surfaces: [surface],
+    })
+    const movedPlacement = placement('panel-317', { x: 999, y: 1 })
+    const moved = initial.map((item) => item.id === movedPlacement.id
+      ? { ...item, placement: movedPlacement, pose: { ...item.pose, matrix: [...item.pose.matrix.slice(0, 12), 999, item.pose.matrix[13], item.pose.matrix[14], item.pose.matrix[15]] as unknown as typeof item.pose.matrix } }
+      : item)
+    const lookup = createCompactInstanceLookup(moved)
+    const resolved = lookup.get('panel-317')
+    expect(resolved?.instanceIndex).toBe(317)
+    expect(resolved?.state).toBe('placed')
+    expect(lookup.get('panel-missing')).toBeUndefined()
+    expect(changedPanelInstanceIndices(initial, moved)).toEqual([317])
+  })
+
+  it('expands panel bounds conservatively for an outward instance without scanning peers', () => {
+    const bounds = new THREE.Sphere(new THREE.Vector3(0, 0, 0), 1)
+    expandSphereBySphere(bounds, new THREE.Sphere(new THREE.Vector3(0.25, 0, 0), 0.5))
+    expect(bounds.center.toArray()).toEqual([0, 0, 0])
+    expect(bounds.radius).toBe(1)
+
+    expandSphereBySphere(bounds, new THREE.Sphere(new THREE.Vector3(3, 0, 0), 0.5))
+    expect(bounds.center.x).toBeCloseTo(1.25)
+    expect(bounds.radius).toBeCloseTo(2.25)
+
+    const encompassing = new THREE.Sphere(new THREE.Vector3(2, 0, 0), 3)
+    expandSphereBySphere(bounds, encompassing)
+    expect(bounds.center.toArray()).toEqual(encompassing.center.toArray())
+    expect(bounds.radius).toBe(encompassing.radius)
   })
 
   it('maps center, frame, horizontal-cell, and vertical-cell hits to one panel instance', () => {
@@ -340,6 +406,30 @@ describe('panel batch lifecycle helpers', () => {
     expect(horizontalCellMeshes.every((mesh) => mesh.instanceMatrix.count >= 14)).toBe(true)
     expect(verticalCellMeshes.every((mesh) => mesh.instanceMatrix.count >= 14)).toBe(true)
 
+    geometry.dispose()
+    material.dispose()
+  })
+
+  it('does not re-upload an unchanged instance buffer during pointer-only updates', () => {
+    const geometry = new THREE.BoxGeometry(1, 1, 1)
+    const material = new THREE.MeshBasicMaterial()
+    const mesh = new THREE.InstancedMesh(geometry, material, 3)
+    const initialVersion = mesh.instanceMatrix.version
+
+    syncInstancedMeshCount(mesh, 3)
+    expect(mesh.instanceMatrix.version).toBe(initialVersion)
+
+    syncInstancedMeshCount(mesh, 4)
+    const resizedVersion = mesh.instanceMatrix.version
+    expect(resizedVersion).toBeGreaterThan(initialVersion)
+
+    // Shrinking the draw count does not touch the backing matrix attribute;
+    // setMatrixAt on the changed slot is the only operation that should mark
+    // a GPU upload for a subsequent drag update.
+    syncInstancedMeshCount(mesh, 2)
+    expect(mesh.instanceMatrix.version).toBe(resizedVersion)
+
+    mesh.dispose()
     geometry.dispose()
     material.dispose()
   })

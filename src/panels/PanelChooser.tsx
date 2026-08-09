@@ -67,6 +67,13 @@ export function PanelChooser({
   const modelOptions = selectedPanel !== null && !visiblePanels.some((panel) => panel.id === selectedPanel.id)
     ? [selectedPanel, ...visiblePanels]
     : visiblePanels
+  const addPanelDisabled = selectedPanel === null || onAddPanel === undefined
+  const addPanelDisabledReason = onAddPanel === undefined
+    ? 'Adding panels is unavailable in this context.'
+    : selectedPanel === null
+      ? 'Choose a panel model before adding it.'
+      : undefined
+  const addPanelDisabledReasonId = 'panel-add-disabled-reason'
 
   return (
     <aside className={`panel-chooser ${className}`.trim()} aria-label="Panel" data-panel-tab="true" data-testid="panel-chooser">
@@ -137,7 +144,16 @@ export function PanelChooser({
 
           <PanelPreview panel={selectedPanel} />
           <div className="panel-chooser__actions">
-            <button type="button" className="panel-button panel-button--primary" disabled={selectedPanel === null} onClick={() => { if (selectedPanel !== null) onAddPanel?.(selectedPanel) }}>+ Panel</button>
+            {addPanelDisabledReason === undefined ? null : <span id={addPanelDisabledReasonId} className="sr-only">{addPanelDisabledReason}</span>}
+            <button
+              type="button"
+              className="panel-button panel-button--primary"
+              disabled={addPanelDisabled}
+              aria-describedby={addPanelDisabledReason === undefined ? undefined : addPanelDisabledReasonId}
+              onClick={() => { if (selectedPanel !== null) onAddPanel?.(selectedPanel) }}
+            >
+              + Panel
+            </button>
             <button type="button" className="panel-button panel-button--quiet" onClick={() => { setShowCustomForm(true) }}>Add custom panel</button>
           </div>
         </>

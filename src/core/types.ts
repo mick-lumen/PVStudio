@@ -41,6 +41,37 @@ export interface SurfaceFrame {
   readonly tangentY: SurfaceNormal
 }
 
+/** Supported roof perimeter/interior edge semantics. */
+export type SurfaceEdgeType = 'gutter' | 'ridge' | 'valley' | 'rake'
+
+/** Shared lower bound for authored edge directions in local metres. */
+export const SURFACE_EDGE_DIRECTION_EPSILON = 1e-8
+
+/** Which side of an authored edge line contains the roof interior. */
+export type SurfaceEdgeSide = 'left' | 'right'
+
+/** A finite local line used to disambiguate which side of an edge is the roof. */
+export interface SurfaceEdgeLine {
+  readonly origin: Point2
+  /** Direction along the line, in the same local coordinates as the surface. */
+  readonly direction: Point2
+}
+
+/** Typed edge metadata shared by placement, auto-fill and rendering. */
+export interface SurfaceEdgeMetadata {
+  readonly type: SurfaceEdgeType
+  /** Direction along the selected edge, not a normal/"downhill" vector. */
+  readonly direction: Point2
+  readonly line?: SurfaceEdgeLine
+  /** Optional side of `line` containing the roof interior. */
+  readonly side?: SurfaceEdgeSide
+}
+
+/** A surface-keyed edge record suitable for a placement context. */
+export interface SurfaceEdge extends SurfaceEdgeMetadata {
+  readonly surfaceId: string
+}
+
 /** An axis-aligned local rectangle in metres. Non-positive dimensions are invalid. */
 export interface Rect {
   readonly x: number
@@ -77,6 +108,8 @@ export interface SurfaceDescriptor {
   readonly tiltDeg: number
   readonly usableArea: number
   readonly faceRefs: readonly SurfaceFaceRef[]
+  /** Optional edge metadata embedded by newer producers; omitted by legacy payloads. */
+  readonly edge?: SurfaceEdgeMetadata
 }
 
 /** A hit resolved by the viewer without leaking a Three.js intersection. */
@@ -113,6 +146,12 @@ export interface PanelGroupSettings {
   readonly setbackM: number
   readonly clearanceM: number
   readonly tiltDeg: number
+  /** Optional maximum module count emitted on each auto-fill row. */
+  readonly modulesPerRow?: number
+  /** Optional alternating-row offset measured along the generated row axis. */
+  readonly rowOffsetM?: number
+  /** Optional extra clearance applied around exclusion obstacles only. */
+  readonly obstacleClearanceM?: number
 }
 
 /** Safe defaults matching the placement product requirements. */
@@ -156,6 +195,8 @@ export interface AutoFillRequest {
   readonly obstacles: readonly RectangularObstacle[]
   readonly settings: PanelGroupSettings
   readonly groupId?: string
+  /** Optional edge metadata. Omission retains the canonical surface frame. */
+  readonly edge?: SurfaceEdgeMetadata
 }
 
 /** One ghosted panel in an auto-fill preview, before confirmation. */

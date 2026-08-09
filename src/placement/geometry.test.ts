@@ -14,6 +14,7 @@ import {
   candidateBounds,
   createSurfaceFrame,
   generateAutoFill,
+  deriveSurfaceEdgeAxes,
   normaliseRect,
   normaliseSurfaceNormal,
   orientedFootprint,
@@ -122,6 +123,64 @@ describe('surface-local geometry', () => {
     }))
     expect(calculateTotalWattage(placements, { [panel.id]: panel })).toBe(800)
     expect(calculateTotalKwp(placements, { [panel.id]: panel })).toBe(0.8)
+  })
+
+  it('follows typed edge direction for rows and reverses deterministic ordering', () => {
+    const forward = generateAutoFill(panel, request({ x: 0, y: 0, width: 5, height: 5 }, {
+      edge: { type: 'gutter', direction: { x: 1, y: 0 } },
+      settings: { ...settings, interPanelSpacingM: 0.1, rowSpacingM: 0.2 },
+    }))
+    const reverse = generateAutoFill(panel, request({ x: 0, y: 0, width: 5, height: 5 }, {
+      edge: { type: 'gutter', direction: { x: -1, y: 0 } },
+      settings: { ...settings, interPanelSpacingM: 0.1, rowSpacingM: 0.2 },
+    }))
+    expect(forward.length).toBe(reverse.length)
+    expect(forward[0]?.localCenter).toEqual({ x: 0.7, y: 1.2 })
+    expect(reverse[0]?.localCenter).toEqual({ x: 4.3, y: 1.2 })
+    expect(reverse.map((candidate) => candidate.localCenter.y)).toEqual(forward.map((candidate) => candidate.localCenter.y))
+    expect(reverse[1]?.localCenter.y).toBe(reverse[0]?.localCenter.y)
+    expect(forward[1]?.localCenter.x).toBeGreaterThan(forward[0]?.localCenter.x ?? 0)
+    expect(reverse[1]?.localCenter.x).toBeLessThan(reverse[0]?.localCenter.x ?? 0)
+    expect(deriveSurfaceEdgeAxes(undefined)).toEqual({ rowAxis: { x: 1, y: 0 }, crossAxis: { x: 0, y: 1 }, traversalSign: 1 })
+    expect(deriveSurfaceEdgeAxes({ type: 'gutter', direction: { x: 0, y: -2 } })).toEqual({ rowAxis: { x: 0, y: -1 }, crossAxis: { x: 1, y: 0 }, traversalSign: 1 })
+    const forwardAxes = deriveSurfaceEdgeAxes({ type: 'gutter', direction: { x: 1, y: 0 } })
+    const reverseAxes = deriveSurfaceEdgeAxes({ type: 'gutter', direction: { x: -1, y: 0 } })
+    expect(reverseAxes.rowAxis).toEqual(forwardAxes.rowAxis)
+    expect(reverseAxes.crossAxis).toEqual(forwardAxes.crossAxis)
+    expect(forwardAxes.traversalSign).toBe(1)
+    expect(reverseAxes.traversalSign).toBe(-1)
+    expect(forwardAxes.rowAxis.x * forwardAxes.crossAxis.y - forwardAxes.rowAxis.y * forwardAxes.crossAxis.x).toBe(1)
+  })
+
+  it('orients ridge cross-axis toward the roof interior when a line is supplied', () => {
+    expect(deriveSurfaceEdgeAxes({
+      type: 'ridge',
+      direction: { x: 1, y: 0 },
+      line: { origin: { x: 0, y: 3 }, direction: { x: 1, y: 0 } },
+    }, { x: 0, y: 0, width: 5, height: 5 })).toEqual({ rowAxis: { x: -1, y: 0 }, crossAxis: { x: 0, y: -1 }, traversalSign: -1 })
+  })
+
+  it('faces gutters toward their line and ridges into concave roof regions without an explicit side', () => {
+    const region = {
+      points: [
+        { x: 0, y: 0 }, { x: 8, y: 0 }, { x: 8, y: 8 }, { x: 6, y: 8 },
+        { x: 6, y: 2 }, { x: 2, y: 2 }, { x: 2, y: 8 }, { x: 0, y: 8 },
+      ],
+    }
+    const gutter = deriveSurfaceEdgeAxes({
+      type: 'gutter',
+      direction: { x: 1, y: 0 },
+      line: { origin: { x: 0, y: 0 }, direction: { x: 1, y: 0 } },
+    }, region)
+    const ridge = deriveSurfaceEdgeAxes({
+      type: 'ridge',
+      direction: { x: 1, y: 0 },
+      line: { origin: { x: 0, y: 8 }, direction: { x: 1, y: 0 } },
+    }, region)
+    expect(gutter.crossAxis).toEqual({ x: 0, y: -1 })
+    expect(ridge.crossAxis).toEqual({ x: 0, y: -1 })
+    expect(gutter.rowAxis.x * gutter.crossAxis.y - gutter.rowAxis.y * gutter.crossAxis.x).toBe(1)
+    expect(ridge.rowAxis.x * ridge.crossAxis.y - ridge.rowAxis.y * ridge.crossAxis.x).toBe(1)
   })
 
   it('rejects malformed dimensions and settings rather than producing NaN candidates', () => {

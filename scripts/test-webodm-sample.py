@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import shutil
 import sys
 import tempfile
@@ -28,7 +29,13 @@ class FixtureValidatorAdversarialTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory(prefix="pvstudio-webodm-test-")
         self.root = Path(self.temp_dir.name) / FIXTURE_PATH.name
-        shutil.copytree(FIXTURE_PATH, self.root)
+        self.root.mkdir()
+        # Hard-link the large immutable fixture so map/JPEG tests do not copy
+        # ~79 MiB for every case.  A test calls _copy_for_write before mutating
+        # a file, preserving both the checked-in fixture and test isolation.
+        for source in FIXTURE_PATH.iterdir():
+            if source.is_file():
+                os.link(source, self.root / source.name)
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
@@ -37,11 +44,17 @@ class FixtureValidatorAdversarialTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             GENERATOR.validate(self.root)
 
+    def _copy_for_write(self, name: str) -> Path:
+        target = self.root / name
+        target.unlink()
+        shutil.copy2(FIXTURE_PATH / name, target)
+        return target
+
     def test_checked_in_fixture_is_valid(self) -> None:
         self.assertEqual(GENERATOR.validate(self.root), GENERATOR.EXPECTED_COUNTS)
 
     def test_missing_map_kd_fails(self) -> None:
-        mtl_path = self.root / "synthetic-webodm-house.mtl"
+        mtl_path = self._copy_for_write("synthetic-webodm-house.mtl")
         mtl = mtl_path.read_text(encoding="utf-8")
         mtl_path.write_text(mtl.replace("map_Kd ground-texture.jpg\n", "", 1), encoding="utf-8")
         self.assert_invalid()
@@ -50,20 +63,21 @@ class FixtureValidatorAdversarialTests(unittest.TestCase):
         for replacement in ("../ground-texture.jpg", "/tmp/ground-texture.jpg", r"C:\\textures\\ground-texture.jpg"):
             with self.subTest(replacement=replacement):
                 mtl_path = self.root / "synthetic-webodm-house.mtl"
+                self._copy_for_write("synthetic-webodm-house.mtl")
                 mtl = mtl_path.read_text(encoding="utf-8")
                 mtl_path.write_text(mtl.replace("map_Kd ground-texture.jpg", f"map_Kd {replacement}", 1), encoding="utf-8")
                 self.assert_invalid()
                 mtl_path.write_text(mtl, encoding="utf-8")
 
     def test_all_zero_geometry_fails(self) -> None:
-        obj_path = self.root / "synthetic-webodm-house.obj"
+        obj_path = self._copy_for_write("synthetic-webodm-house.obj")
         lines = obj_path.read_text(encoding="utf-8").splitlines(keepends=True)
         zeroed = ["v 0.00000 0.00000 0.00000\n" if line.startswith("v ") else line for line in lines]
         obj_path.write_text("".join(zeroed), encoding="utf-8")
         self.assert_invalid()
 
     def test_truncated_and_malformed_jpeg_fail(self) -> None:
-        texture_path = self.root / "ground-texture.jpg"
+        texture_path = self._copy_for_write("ground-texture.jpg")
         original = texture_path.read_bytes()
         for malformed in (original[:-2], b"\xff\xd8\xff\xd9"):
             with self.subTest(length=len(malformed)):
@@ -74,7 +88,7 @@ class FixtureValidatorAdversarialTests(unittest.TestCase):
     def test_entropy_corruption_with_eoi_preserved_fails(self) -> None:
         """Marker parsing alone must not accept a bit-flipped scan payload."""
 
-        texture_path = self.root / "ground-texture.jpg"
+        texture_path = self._copy_for_write("ground-texture.jpg")
         corrupted = bytearray(texture_path.read_bytes())
         sos = corrupted.find(b"\xff\xda")
         self.assertGreaterEqual(sos, 0)
@@ -96,7 +110,7 @@ class FixtureValidatorAdversarialTests(unittest.TestCase):
     def test_scan_truncation_with_eoi_preserved_fails(self) -> None:
         """Removing most entropy data while retaining EOI must fail integrity."""
 
-        texture_path = self.root / "ground-texture.jpg"
+        texture_path = self._copy_for_write("ground-texture.jpg")
         original = texture_path.read_bytes()
         sos = original.find(b"\xff\xda")
         self.assertGreaterEqual(sos, 0)

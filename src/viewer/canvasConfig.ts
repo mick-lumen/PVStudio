@@ -1,6 +1,9 @@
 export interface ViewerCanvasConfig {
   readonly dpr: [number, number]
   readonly frameloop: 'demand'
+  readonly style: {
+    readonly touchAction: 'none'
+  }
 }
 
 /**
@@ -15,5 +18,6 @@ export function createViewerCanvasConfig(devicePixelRatio: number | undefined): 
   return {
     dpr: [1, Math.min(1.5, Math.max(1, ratio))],
     frameloop: 'demand',
+    style: { touchAction: 'none' },
   }
 }

@@ -59,4 +59,52 @@ describe('viewer metadata', () => {
       material.dispose()
     }
   })
+
+  it('uses parser-owned source counts and bounds without rescanning expanded positions', async () => {
+    const values = new Float32Array([
+      0, 0, 0,
+      2, 0, 0,
+      0, 0, 2,
+      0, 0, 0,
+      2, 0, 0,
+      0, 0, 2,
+    ])
+    const geometry = new THREE.BufferGeometry()
+    const position = new THREE.BufferAttribute(values, 3)
+    geometry.setAttribute('position', position)
+    geometry.setIndex([0, 1, 2, 3, 4, 5])
+    const material = new THREE.MeshBasicMaterial()
+    const mesh = new THREE.Mesh(geometry, material)
+    const root = new THREE.Group()
+    root.add(mesh)
+    const getX = vi.spyOn(position, 'getX')
+    try {
+      const metadata = await computeViewerMetadataAsync(root, 'Source counts', false, {
+        source: {
+          vertexCount: 3,
+          polygonCount: 2,
+          bounds: {
+            min: { x: 0, y: 0, z: 0 },
+            max: { x: 100, y: 100, z: 100 },
+            size: { x: 100, y: 100, z: 100 },
+          },
+          renderedBounds: {
+            min: { x: 0, y: 0, z: 0 },
+            max: { x: 2, y: 0, z: 2 },
+            size: { x: 2, y: 0, z: 2 },
+          },
+        },
+      })
+      expect(metadata.vertexCount).toBe(6)
+      expect(metadata.sourceVertexCount).toBe(3)
+      expect(metadata.sourcePolygonCount).toBe(2)
+      expect(metadata.sourceBounds?.max.x).toBe(100)
+      expect(metadata.boundingBox.max.z).toBe(2)
+      expect(getX).not.toHaveBeenCalled()
+    } finally {
+      getX.mockRestore()
+      geometry.dispose()
+      material.dispose()
+    }
+  })
 })

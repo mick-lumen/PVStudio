@@ -1,3 +1,4 @@
+import { SURFACE_EDGE_DIRECTION_EPSILON } from './types'
 import type {
   AutoFillCandidate,
   AutoFillPreview,
@@ -12,6 +13,11 @@ import type {
   Rect,
   RectangularObstacle,
   SurfaceDescriptor,
+  SurfaceEdge,
+  SurfaceEdgeLine,
+  SurfaceEdgeMetadata,
+  SurfaceEdgeSide,
+  SurfaceEdgeType,
   SurfaceFaceRef,
   SurfaceFrame,
   SurfaceNormal,
@@ -19,7 +25,7 @@ import type {
   SurfaceSelection,
 } from './types'
 
-const MIN_VECTOR_LENGTH_SQUARED = 1e-16
+const MIN_VECTOR_LENGTH_SQUARED = SURFACE_EDGE_DIRECTION_EPSILON ** 2
 
 type RecordValue = Record<string, unknown>
 
@@ -138,7 +144,9 @@ export const isSurfaceDescriptor = (value: unknown): value is SurfaceDescriptor 
   if (!isFiniteNumber(value.area) || value.area < 0) return false
   if (!isFiniteNumber(value.azimuthDeg) || !isFiniteNumber(value.tiltDeg)) return false
   if (!isFiniteNumber(value.usableArea) || value.usableArea < 0 || value.usableArea > value.area) return false
-  return Array.isArray(value.faceRefs) && value.faceRefs.every(isSurfaceFaceRef)
+  return Array.isArray(value.faceRefs)
+    && value.faceRefs.every(isSurfaceFaceRef)
+    && (value.edge === undefined || isSurfaceEdgeMetadata(value.edge))
 }
 
 /** A runtime guard for a viewer hit resolved to a canonical surface. */
@@ -146,6 +154,33 @@ export const isSurfaceSelection = (value: unknown): value is SurfaceSelection =>
   if (!isRecord(value)) return false
   return isSurfaceDescriptor(value.surface) && isPoint2(value.hitLocal) && isPoint3(value.worldPoint)
 }
+
+/** A runtime guard for the supported roof-edge semantics. */
+export const isSurfaceEdgeType = (value: unknown): value is SurfaceEdgeType =>
+  value === 'gutter' || value === 'ridge' || value === 'valley' || value === 'rake'
+
+/** A runtime guard for the optional roof-interior side annotation. */
+export const isSurfaceEdgeSide = (value: unknown): value is SurfaceEdgeSide =>
+  value === 'left' || value === 'right'
+
+/** A runtime guard for a finite local edge line. */
+export const isSurfaceEdgeLine = (value: unknown): value is SurfaceEdgeLine => {
+  if (!isRecord(value)) return false
+  return isPoint2(value.origin) && isPoint2(value.direction)
+    && Math.hypot(value.direction.x, value.direction.y) > Math.sqrt(MIN_VECTOR_LENGTH_SQUARED)
+}
+
+/** A runtime guard for typed edge metadata without a surface key. */
+export const isSurfaceEdgeMetadata = (value: unknown): value is SurfaceEdgeMetadata => {
+  if (!isRecord(value) || !isSurfaceEdgeType(value.type) || !isPoint2(value.direction)) return false
+  return Math.hypot(value.direction.x, value.direction.y) > Math.sqrt(MIN_VECTOR_LENGTH_SQUARED)
+    && (value.line === undefined || isSurfaceEdgeLine(value.line))
+    && (value.side === undefined || (value.line !== undefined && isSurfaceEdgeSide(value.side)))
+}
+
+/** A runtime guard for a surface-keyed typed edge record. */
+export const isSurfaceEdge = (value: unknown): value is SurfaceEdge =>
+  isRecord(value) && hasNonEmptyString(value, 'surfaceId') && isSurfaceEdgeMetadata(value)
 
 /** A runtime guard for the two supported panel orientations. */
 export const isOrientation = (value: unknown): value is PanelGroupSettings['orientation'] =>
@@ -172,6 +207,9 @@ export const isPanelDefinition = (value: unknown): value is PanelDefinition => {
 /** A runtime guard for complete group settings. */
 export const isPanelGroupSettings = (value: unknown): value is PanelGroupSettings => {
   if (!isRecord(value) || !isOrientation(value.orientation)) return false
+  const modulesPerRow = value.modulesPerRow
+  const rowOffsetM = value.rowOffsetM
+  const obstacleClearanceM = value.obstacleClearanceM
   return isFiniteNumber(value.interPanelSpacingM)
     && value.interPanelSpacingM >= 0
     && isFiniteNumber(value.rowSpacingM)
@@ -183,6 +221,10 @@ export const isPanelGroupSettings = (value: unknown): value is PanelGroupSetting
     && isFiniteNumber(value.tiltDeg)
     && value.tiltDeg >= 0
     && value.tiltDeg <= 90
+    && (modulesPerRow === undefined
+      || (isFiniteNumber(modulesPerRow) && Number.isInteger(modulesPerRow) && modulesPerRow > 0))
+    && (rowOffsetM === undefined || (isFiniteNumber(rowOffsetM) && rowOffsetM >= 0))
+    && (obstacleClearanceM === undefined || (isFiniteNumber(obstacleClearanceM) && obstacleClearanceM >= 0))
 }
 
 /** A runtime guard for a serialisable local panel placement. */
@@ -209,7 +251,8 @@ export const isAutoFillRequest = (value: unknown): value is AutoFillRequest => {
   if (!isRecord(value) || !hasNonEmptyString(value, 'panelId') || !hasNonEmptyString(value, 'surfaceId')) return false
   if (!isSurfaceRegion(value.region) || !isPanelGroupSettings(value.settings)) return false
   if (!Array.isArray(value.obstacles) || !value.obstacles.every(isRectangularObstacle)) return false
-  return value.groupId === undefined || hasNonEmptyString(value, 'groupId')
+  return (value.groupId === undefined || hasNonEmptyString(value, 'groupId'))
+    && (value.edge === undefined || isSurfaceEdgeMetadata(value.edge))
 }
 
 /** A runtime guard for one ghosted auto-fill candidate. */
@@ -258,6 +301,20 @@ function copyPoint3(value: Point3): Point3 {
 
 function copyNormal(value: SurfaceNormal): SurfaceNormal {
   return { x: value.x, y: value.y, z: value.z }
+}
+
+function copySurfaceEdgeMetadata(value: SurfaceEdgeMetadata): SurfaceEdgeMetadata {
+  return {
+    type: value.type,
+    direction: copyPoint2(value.direction),
+    ...(value.line === undefined ? {} : {
+      line: {
+        origin: copyPoint2(value.line.origin),
+        direction: copyPoint2(value.line.direction),
+      },
+    }),
+    ...(value.side === undefined ? {} : { side: value.side }),
+  }
 }
 
 /** Validate and clone a point into an immutable DTO. */
@@ -318,6 +375,18 @@ export function createSurfaceFaceRef(value: SurfaceFaceRef): SurfaceFaceRef {
   return deepFreeze({ meshId: value.meshId.trim(), faceIndices: [...value.faceIndices] })
 }
 
+/** Validate and clone typed surface-edge metadata. */
+export function createSurfaceEdgeMetadata(value: SurfaceEdgeMetadata): SurfaceEdgeMetadata {
+  assertValid(isSurfaceEdgeMetadata(value), 'SurfaceEdgeMetadata contains an invalid type, direction or line')
+  return deepFreeze(copySurfaceEdgeMetadata(value))
+}
+
+/** Validate and clone a surface-keyed typed edge. */
+export function createSurfaceEdge(value: SurfaceEdge): SurfaceEdge {
+  assertValid(isSurfaceEdge(value), 'SurfaceEdge contains an invalid surface id or metadata')
+  return deepFreeze({ surfaceId: value.surfaceId.trim(), ...copySurfaceEdgeMetadata(value) })
+}
+
 /** Validate and clone a surface descriptor. */
 export function createSurfaceDescriptor(value: SurfaceDescriptor): SurfaceDescriptor {
   assertValid(isSurfaceDescriptor(value), 'SurfaceDescriptor contains invalid geometry or measurements')
@@ -330,6 +399,7 @@ export function createSurfaceDescriptor(value: SurfaceDescriptor): SurfaceDescri
     tiltDeg: value.tiltDeg,
     usableArea: value.usableArea,
     faceRefs: value.faceRefs.map(createSurfaceFaceRef),
+    ...(value.edge === undefined ? {} : { edge: createSurfaceEdgeMetadata(value.edge) }),
   })
 }
 
@@ -368,6 +438,9 @@ export function createPanelGroupSettings(value: PanelGroupSettings): PanelGroupS
     setbackM: value.setbackM,
     clearanceM: value.clearanceM,
     tiltDeg: value.tiltDeg,
+    ...(value.modulesPerRow === undefined ? {} : { modulesPerRow: value.modulesPerRow }),
+    ...(value.rowOffsetM === undefined ? {} : { rowOffsetM: value.rowOffsetM }),
+    ...(value.obstacleClearanceM === undefined ? {} : { obstacleClearanceM: value.obstacleClearanceM }),
   })
 }
 
@@ -408,6 +481,7 @@ export function createAutoFillRequest(value: AutoFillRequest): AutoFillRequest {
     obstacles: value.obstacles.map(createRectangularObstacle),
     settings: createPanelGroupSettings(value.settings),
     ...(value.groupId === undefined ? {} : { groupId: value.groupId.trim() }),
+    ...(value.edge === undefined ? {} : { edge: createSurfaceEdgeMetadata(value.edge) }),
   })
 }
 

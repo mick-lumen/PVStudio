@@ -1,6 +1,7 @@
 export {
   PanelBatch,
   NO_PANEL_RAYCAST,
+  PANEL_CELL_INTERACTION_PROPS,
   type PanelBatchProps,
 } from './PanelBatch'
 export {
@@ -43,8 +44,22 @@ export {
   type PanelRenderBatch,
   type PanelRenderItem,
   type SurfaceCollection,
+  type SurfaceEdgeCollection,
   type PanelVisualCollection,
 } from './layout'
+export {
+  changedPanelInstanceIndices,
+  compactPanelItemsByState,
+  createCompactInstanceLookup,
+  createCompactPanelItems,
+  expandSphereBySphere,
+  panelIdToCompactInstance,
+  panelInstanceIndex,
+  panelRenderItemsHaveSameMatrix,
+  PANEL_VISUAL_STATE_ORDER,
+  type CompactPanelInstance,
+  type CompactPanelItems,
+} from './PanelBatch.helpers'
 export {
   add,
   calculatePanelPose,

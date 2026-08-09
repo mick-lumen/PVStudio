@@ -1,5 +1,6 @@
 import { Canvas, type ThreeEvent, useFrame, useThree } from '@react-three/fiber'
 import { OrbitControls, OrthographicCamera, PerspectiveCamera } from '@react-three/drei'
+import type { OrbitControls as OrbitControlsObject } from 'three-stdlib'
 import * as THREE from 'three'
 import {
   type CSSProperties,
@@ -26,7 +27,9 @@ import {
 } from './surfaceSelection'
 import { runViewerSurfaceAnalysis, selectViewerSurface } from './viewerLifecycle'
 import { toViewerSurfaceModelPoint } from './surfacePointer'
-import { viewerOrbitControlsEnabled } from './viewerControls'
+import { createViewerOrbitControlsConfig, usePrefersReducedMotion, viewerOrbitControlsEnabled } from './viewerControls'
+import './viewer.css'
+import type { Point2, SurfaceFrame } from '../core'
 import type {
   ViewerCameraMode,
   ViewerLoadProgress,
@@ -35,6 +38,7 @@ import type {
   ViewerRenderMode,
   ViewerSurfaceInteractionMode,
   ViewerSurfacePointerEvent,
+  ViewerSurfacePointerBox,
   ViewerSurfacePointerPhase,
   ViewerSurfaceSelectEvent,
 } from './types'
@@ -53,6 +57,7 @@ interface ViewerSceneProps {
   readonly cameraMode: ViewerCameraMode
   readonly renderMode: ViewerRenderMode
   readonly surfaceInteractionMode: ViewerSurfaceInteractionMode
+  readonly surfaceGestureActive: boolean
   readonly showGrid: boolean
   readonly sceneContent: ReactNode
   readonly shadows: boolean
@@ -252,9 +257,30 @@ function controlsTargetOrFallback(controls: unknown, fallback: THREE.Vector3): T
   return candidate instanceof THREE.Vector3 ? candidate : fallback
 }
 
+interface ViewerOrbitControlsHandle {
+  enabled: boolean
+}
+
+function viewerOrbitControlsHandle(value: unknown): ViewerOrbitControlsHandle | null {
+  if (typeof value !== 'object' || value === null || !('enabled' in value)) return null
+  const enabled = value.enabled
+  return typeof enabled === 'boolean' ? value as ViewerOrbitControlsHandle : null
+}
+
 interface PointerCaptureTarget {
   readonly setPointerCapture: (pointerId: number) => void
   readonly releasePointerCapture?: (pointerId: number) => void
+}
+
+interface NativeSurfaceIntersection {
+  readonly hit: ViewerSurfaceHit
+}
+
+interface NativeSurfacePointer {
+  readonly surfaceId: string
+  readonly frame: SurfaceFrame
+  readonly startX: number
+  readonly startY: number
 }
 
 function pointerCaptureTarget(value: EventTarget | null): PointerCaptureTarget | null {
@@ -311,7 +337,7 @@ function CameraMetrics({ frame, target, onChange }: { frame: ReturnType<typeof c
   return null
 }
 
-function ViewerScene({ model, progress, cameraMode, renderMode, surfaceInteractionMode, showGrid, sceneContent, shadows, selected, onSurfaceHit, onSurfacePointer, onSurfaceMiss, onCameraMetrics }: ViewerSceneProps): ReactNode {
+function ViewerScene({ model, progress, cameraMode, renderMode, surfaceInteractionMode, surfaceGestureActive, showGrid, sceneContent, shadows, selected, onSurfaceHit, onSurfacePointer, onSurfaceMiss, onCameraMetrics }: ViewerSceneProps): ReactNode {
   const normalised = useMemo(() => ({
     position: model.frame.center.clone().multiplyScalar(-model.frame.scale),
     scale: model.frame.scale,
@@ -324,6 +350,10 @@ function ViewerScene({ model, progress, cameraMode, renderMode, surfaceInteracti
   }), [model.frame])
   const viewport = useThree((state) => state.size)
   const invalidate = useThree((state) => state.invalidate)
+  const controls = useThree((state) => state.controls)
+  const gl = useThree((state) => state.gl)
+  const camera = useThree((state) => state.camera)
+  const scene = useThree((state) => state.scene)
   const aspect = viewport.width > 0 && viewport.height > 0 ? viewport.width / viewport.height : 1
   const fit = useMemo(() => fitViewerCamera(normalisedFrame, aspect, cameraMode), [aspect, cameraMode, normalisedFrame])
   const orthographicFrustum = useMemo(() => createViewerOrthographicFrustum(fit.orthographicSize, aspect), [aspect, fit.orthographicSize])
@@ -331,21 +361,69 @@ function ViewerScene({ model, progress, cameraMode, renderMode, surfaceInteracti
   const gridExtent = Math.max(normalisedFrame.size.x, normalisedFrame.size.z, 12) * 1.6
   const cameraPosition: [number, number, number] = [fit.position.x, fit.position.y, fit.position.z]
   const cameraTarget: [number, number, number] = [fit.target.x, fit.target.y, fit.target.z]
-  const orbitControlsEnabled = viewerOrbitControlsEnabled(surfaceInteractionMode)
+  const prefersReducedMotion = usePrefersReducedMotion()
+  const orbitControlsConfig = createViewerOrbitControlsConfig(prefersReducedMotion)
   const pointerTrackerRef = useRef<ViewerPointerTracker>(createViewerPointerTracker())
   const pointerCaptureRef = useRef<Map<number, PointerCaptureTarget>>(new Map())
+  const activeSurfacePointersRef = useRef<Set<number>>(new Set())
+  const nativeSurfacePointersRef = useRef<Map<number, NativeSurfacePointer>>(new Map())
+  const orbitControlsRef = useRef<OrbitControlsObject | null>(null)
+  const pointerRaycasterRef = useRef<THREE.Raycaster>(new THREE.Raycaster())
+  const [surfacePointerActive, setSurfacePointerActive] = useState(false)
+  const orbitControlsEnabled = viewerOrbitControlsEnabled(surfaceInteractionMode, surfaceGestureActive || surfacePointerActive)
+  // OrbitControls receives events from the renderer's actual canvas. Attach
+  // capture arbitration there so it runs before the controls' host listener,
+  // regardless of which R3F event source a Canvas version selects.
+  const pointerEventTarget = gl.domElement
+
+  const syncOrbitControlsEnabled = useCallback((enabled: boolean): void => {
+    const handle = orbitControlsRef.current ?? viewerOrbitControlsHandle(controls)
+    if (handle !== null) handle.enabled = enabled
+  }, [controls])
+
+  // React state keeps the declarative OrbitControls prop in sync, while this
+  // imperative write closes the native-listener race on pointerdown. drei's
+  // controls are attached to the same Canvas element as R3F's pointer manager.
+  useEffect(() => {
+    syncOrbitControlsEnabled(orbitControlsEnabled)
+  }, [orbitControlsEnabled, syncOrbitControlsEnabled])
+
+  const beginSurfacePointer = useCallback((pointerId: number): void => {
+    activeSurfacePointersRef.current.add(pointerId)
+    setSurfacePointerActive(true)
+    syncOrbitControlsEnabled(false)
+  }, [syncOrbitControlsEnabled])
+
+  const finishSurfacePointer = useCallback((pointerId: number): void => {
+    if (!activeSurfacePointersRef.current.delete(pointerId)) return
+    const remaining = activeSurfacePointersRef.current.size > 0
+    setSurfacePointerActive(remaining)
+    syncOrbitControlsEnabled(viewerOrbitControlsEnabled(surfaceInteractionMode, surfaceGestureActive || remaining))
+  }, [surfaceGestureActive, surfaceInteractionMode, syncOrbitControlsEnabled])
+
+  const clearSurfacePointers = useCallback((): void => {
+    nativeSurfacePointersRef.current.clear()
+    if (activeSurfacePointersRef.current.size === 0) {
+      syncOrbitControlsEnabled(viewerOrbitControlsEnabled(surfaceInteractionMode, surfaceGestureActive))
+      return
+    }
+    activeSurfacePointersRef.current.clear()
+    setSurfacePointerActive(false)
+    syncOrbitControlsEnabled(viewerOrbitControlsEnabled(surfaceInteractionMode, surfaceGestureActive))
+  }, [surfaceGestureActive, surfaceInteractionMode, syncOrbitControlsEnabled])
 
   // Surface hits are supplied by the packed model picker proxy below. Disable
   // each imported mesh's default triangle walk while it is mounted so a large
   // OBJ cannot turn every hover into an O(faceCount) R3F raycast.
   useEffect(() => disableViewerModelRaycasts(model.loaded.object), [model.loaded.object])
 
+  const inverseNormalisation = useMemo(() => new THREE.Matrix4()
+    .compose(normalised.position, new THREE.Quaternion(), new THREE.Vector3(normalised.scale, normalised.scale, normalised.scale))
+    .invert(), [normalised.position, normalised.scale])
+
   const surfacePicker = useMemo(() => {
     const picker = new THREE.Object3D()
     if (model.index === null) return picker
-    const inverseNormalisation = new THREE.Matrix4()
-      .compose(normalised.position, new THREE.Quaternion(), new THREE.Vector3(normalised.scale, normalised.scale, normalised.scale))
-      .invert()
     picker.raycast = (raycaster: THREE.Raycaster, intersections: THREE.Intersection[]): void => {
       const rawOrigin = raycaster.ray.origin.clone().applyMatrix4(inverseNormalisation)
       const rawDirection = raycaster.ray.direction.clone().transformDirection(inverseNormalisation).normalize()
@@ -357,7 +435,174 @@ function ViewerScene({ model, progress, cameraMode, renderMode, surfaceInteracti
       intersections.push({ distance, point: displayPoint, object: hit.mesh, faceIndex: hit.faceIndex })
     }
     return picker
-  }, [model.index, normalised.position, normalised.scale])
+  }, [inverseNormalisation, model.index])
+
+  /**
+   * OrbitControls listens natively on the Canvas host. A pointerdown capture
+   * listener arbitrates surface drags before that listener runs, while still
+   * allowing R3F's bubble handler to publish the actual selection event.
+   */
+  const nativeDisplayRay = useCallback((clientX: number, clientY: number): THREE.Ray | null => {
+    const bounds = pointerEventTarget.getBoundingClientRect()
+    if (bounds.width <= 0 || bounds.height <= 0 || !Number.isFinite(clientX) || !Number.isFinite(clientY)) return null
+    const pointer = new THREE.Vector2(
+      ((clientX - bounds.left) / bounds.width) * 2 - 1,
+      -((clientY - bounds.top) / bounds.height) * 2 + 1,
+    )
+    const raycaster = pointerRaycasterRef.current
+    raycaster.setFromCamera(pointer, camera)
+    return raycaster.ray.clone()
+  }, [camera, pointerEventTarget])
+
+  const nativeRawRay = useCallback((clientX: number, clientY: number): THREE.Ray | null => {
+    const displayRay = nativeDisplayRay(clientX, clientY)
+    if (displayRay === null) return null
+    return new THREE.Ray(
+      displayRay.origin.clone().applyMatrix4(inverseNormalisation),
+      displayRay.direction.clone().transformDirection(inverseNormalisation).normalize(),
+    )
+  }, [inverseNormalisation, nativeDisplayRay])
+
+  const nativeSurfaceIntersection = useCallback((clientX: number, clientY: number): NativeSurfaceIntersection | null => {
+    if (model.index === null) return null
+    const bounds = pointerEventTarget.getBoundingClientRect()
+    const displayRay = nativeDisplayRay(clientX, clientY)
+    if (bounds.width <= 0 || bounds.height <= 0 || displayRay === null) return null
+    const raycaster = pointerRaycasterRef.current
+    raycaster.ray.copy(displayRay)
+    const intersections: THREE.Intersection[] = []
+    surfacePicker.raycast(raycaster, intersections)
+    const intersection = intersections[0]
+    if (intersection === undefined) return null
+    const point = toViewerSurfaceModelPoint(intersection.point, normalised.position, normalised.scale)
+    const hit = selectViewerSurface(model.index, {
+      object: intersection.object,
+      faceIndex: intersection.faceIndex ?? undefined,
+      point,
+    })
+    return hit === null ? null : { hit }
+  }, [model.index, nativeDisplayRay, normalised.position, normalised.scale, pointerEventTarget, surfacePicker])
+
+  /** Project an arbitrary screen point onto the surface plane captured at
+   * pointerdown. This preserves the screen rectangle's perspective shear even
+   * when a corner lies outside the indexed mesh or over another model object. */
+  const nativeSurfacePlanePoint = useCallback((clientX: number, clientY: number, frame: SurfaceFrame): Point2 | null => {
+    const ray = nativeRawRay(clientX, clientY)
+    if (ray === null) return null
+    const origin = new THREE.Vector3(frame.origin.x, frame.origin.y, frame.origin.z)
+    const normal = new THREE.Vector3(frame.normal.x, frame.normal.y, frame.normal.z)
+    const tangentX = new THREE.Vector3(frame.tangentX.x, frame.tangentX.y, frame.tangentX.z)
+    const tangentY = new THREE.Vector3(frame.tangentY.x, frame.tangentY.y, frame.tangentY.z)
+    if (normal.lengthSq() <= Number.EPSILON || tangentX.lengthSq() <= Number.EPSILON || tangentY.lengthSq() <= Number.EPSILON) return null
+    normal.normalize(); tangentX.normalize(); tangentY.normalize()
+    const denominator = ray.direction.dot(normal)
+    if (Math.abs(denominator) <= 1e-8) return null
+    const distance = origin.clone().sub(ray.origin).dot(normal) / denominator
+    if (!Number.isFinite(distance) || distance < -1e-6) return null
+    const point = ray.origin.clone().addScaledVector(ray.direction, Math.max(0, distance)).sub(origin)
+    return { x: point.dot(tangentX), y: point.dot(tangentY) }
+  }, [nativeRawRay])
+
+  const nativeSurfaceBox = useCallback((pointer: NativeSurfacePointer, native: PointerEvent): ViewerSurfacePointerBox | undefined => {
+    const minX = Math.min(pointer.startX, native.clientX)
+    const maxX = Math.max(pointer.startX, native.clientX)
+    const minY = Math.min(pointer.startY, native.clientY)
+    const maxY = Math.max(pointer.startY, native.clientY)
+    const screenCorners: readonly [number, number][] = [
+      [minX, minY], [maxX, minY], [maxX, maxY], [minX, maxY],
+    ]
+    const corners: Point2[] = []
+    for (const [x, y] of screenCorners) {
+      const point = nativeSurfacePlanePoint(x, y, pointer.frame)
+      if (point === null) return undefined
+      corners.push(point)
+    }
+    return { surfaceId: pointer.surfaceId, corners }
+  }, [nativeSurfacePlanePoint])
+
+  const nativePointerHitsPanel = useCallback((event: PointerEvent): boolean => {
+    const displayRay = nativeDisplayRay(event.clientX, event.clientY)
+    if (displayRay === null) return false
+    const raycaster = pointerRaycasterRef.current
+    raycaster.ray.copy(displayRay)
+    const panelLayer = scene.getObjectByName('pv-panel-layer')
+    if (panelLayer === undefined) return false
+    const panelMeshes: THREE.Object3D[] = []
+    panelLayer.traverse((child) => {
+      if (child instanceof THREE.Mesh && typeof child.raycast === 'function') panelMeshes.push(child)
+    })
+    // Raycast only the panel meshes. The scene also contains lights and
+    // Object3D helpers without a raycast method; passing those to
+    // Raycaster.intersectObjects throws before the surface arbitration can
+    // run. The first panel intersection is the nearest visible hit.
+    const intersections = raycaster.intersectObjects(panelMeshes, false)
+    return intersections.length > 0
+  }, [nativeDisplayRay, scene])
+
+  useEffect(() => {
+    if (surfaceInteractionMode !== 'select' || model.index === null) return
+    const handleNativePointerDown = (event: PointerEvent): void => {
+      if (event.button !== 0 || event.pointerType === 'touch') return
+      const startsOnPanel = nativePointerHitsPanel(event)
+      if (startsOnPanel) {
+        return
+      }
+      const intersection = nativeSurfaceIntersection(event.clientX, event.clientY)
+      if (intersection === null) {
+        return
+      }
+      // This runs in the DOM capture phase, before both R3F's synthetic
+      // pointerdown and OrbitControls' native bubble listener.
+      pointerTrackerRef.current.begin(event.pointerId)
+      const capture = captureNativePointer(event)
+      if (capture !== null) pointerCaptureRef.current.set(event.pointerId, capture)
+      nativeSurfacePointersRef.current.set(event.pointerId, {
+        surfaceId: intersection.hit.selection.surface.id,
+        frame: intersection.hit.selection.surface.frame,
+        startX: event.clientX,
+        startY: event.clientY,
+      })
+      beginSurfacePointer(event.pointerId)
+      onSurfacePointer({
+        phase: 'down',
+        pointerId: event.pointerId,
+        pointerType: event.pointerType,
+        button: event.button,
+        buttons: event.buttons,
+        shiftKey: event.shiftKey,
+        altKey: event.altKey,
+        ctrlKey: event.ctrlKey,
+        metaKey: event.metaKey,
+        selection: intersection.hit.selection,
+      })
+      onSurfaceHit(intersection.hit, event.shiftKey)
+    }
+    const handleNativePointerMove = (event: PointerEvent): void => {
+      if (!nativeSurfacePointersRef.current.has(event.pointerId)) return
+      const intersection = nativeSurfaceIntersection(event.clientX, event.clientY)
+      onSurfacePointer({
+        phase: 'move',
+        pointerId: event.pointerId,
+        pointerType: event.pointerType,
+        button: event.button,
+        buttons: event.buttons,
+        shiftKey: event.shiftKey,
+        altKey: event.altKey,
+        ctrlKey: event.ctrlKey,
+        metaKey: event.metaKey,
+        selection: intersection?.hit.selection ?? null,
+      })
+    }
+    pointerEventTarget.addEventListener('pointerdown', handleNativePointerDown, true)
+    // Pointer capture can move the stream outside the renderer element. Keep
+    // one authoritative move listener at the window level so a box gesture
+    // cannot silently stop updating when it crosses the canvas edge.
+    window.addEventListener('pointermove', handleNativePointerMove, true)
+    return () => {
+      pointerEventTarget.removeEventListener('pointerdown', handleNativePointerDown, true)
+      window.removeEventListener('pointermove', handleNativePointerMove, true)
+    }
+  }, [beginSurfacePointer, model.index, nativePointerHitsPanel, nativeSurfaceIntersection, onSurfaceHit, onSurfacePointer, pointerEventTarget, surfaceInteractionMode])
 
   useEffect(() => {
     applyViewerRenderMode(model.loaded.object, renderMode)
@@ -371,31 +616,43 @@ function ViewerScene({ model, progress, cameraMode, renderMode, surfaceInteracti
   }, [cameraMode, invalidate, model, progress, renderMode, sceneContent, selected, shadows, showGrid])
 
   const notifyNativePointerTermination = useCallback((phase: 'up' | 'cancel', native: PointerEvent): void => {
+    const nativePointer = nativeSurfacePointersRef.current.get(native.pointerId)
+    nativeSurfacePointersRef.current.delete(native.pointerId)
     if (!pointerTrackerRef.current.finish(native.pointerId)) return
+    finishSurfacePointer(native.pointerId)
     const capture = pointerCaptureRef.current.get(native.pointerId) ?? null
     pointerCaptureRef.current.delete(native.pointerId)
     releaseNativePointer(capture, native.pointerId)
+    const intersection = nativePointer !== undefined && phase === 'up' ? nativeSurfaceIntersection(native.clientX, native.clientY) : null
+    const selectionBox = nativePointer !== undefined && phase === 'up'
+      ? nativeSurfaceBox(nativePointer, native)
+      : undefined
     onSurfacePointer({
       phase,
       pointerId: native.pointerId,
+      pointerType: native.pointerType,
       button: native.button,
       buttons: native.buttons,
       shiftKey: native.shiftKey,
       altKey: native.altKey,
       ctrlKey: native.ctrlKey,
       metaKey: native.metaKey,
-      selection: null,
+      selection: intersection?.hit.selection ?? null,
+      ...(selectionBox === undefined ? {} : { surfaceBox: selectionBox }),
     })
-  }, [onSurfacePointer])
+  }, [finishSurfacePointer, nativeSurfaceBox, nativeSurfaceIntersection, onSurfacePointer])
 
   const cancelTrackedPointers = useCallback((): void => {
     cancelViewerPointers(pointerTrackerRef.current, (pointerId) => {
+      nativeSurfacePointersRef.current.delete(pointerId)
+      finishSurfacePointer(pointerId)
       const capture = pointerCaptureRef.current.get(pointerId) ?? null
       pointerCaptureRef.current.delete(pointerId)
       releaseNativePointer(capture, pointerId)
       onSurfacePointer({ phase: 'cancel', pointerId, button: -1, buttons: 0, shiftKey: false, altKey: false, ctrlKey: false, metaKey: false, selection: null })
     })
-  }, [onSurfacePointer])
+    clearSurfacePointers()
+  }, [clearSurfacePointers, finishSurfacePointer, onSurfacePointer])
 
   useEffect(() => {
     if (typeof window === 'undefined') return
@@ -415,7 +672,6 @@ function ViewerScene({ model, progress, cameraMode, renderMode, surfaceInteracti
       window.removeEventListener('lostpointercapture', handleWindowLostCapture)
       window.removeEventListener('blur', handleWindowBlur)
       document.removeEventListener('visibilitychange', handleVisibilityChange)
-      cancelTrackedPointers()
     }
   }, [cancelTrackedPointers, notifyNativePointerTermination])
 
@@ -426,6 +682,7 @@ function ViewerScene({ model, progress, cameraMode, renderMode, surfaceInteracti
     onSurfacePointer({
       phase,
       pointerId: native.pointerId,
+      pointerType: native.pointerType,
       button: native.button,
       buttons: native.buttons,
       shiftKey: native.shiftKey,
@@ -438,33 +695,52 @@ function ViewerScene({ model, progress, cameraMode, renderMode, surfaceInteracti
   }, [model.index, normalised.position, normalised.scale, onSurfacePointer])
 
   const handlePointerMove = useCallback((event: ThreeEvent<PointerEvent>) => {
+    if (nativeSurfacePointersRef.current.has(event.nativeEvent.pointerId)) return
     notifySurfacePointer('move', event)
   }, [notifySurfacePointer])
 
   const handlePointerDown = useCallback((event: ThreeEvent<PointerEvent>) => {
     event.stopPropagation()
-    pointerTrackerRef.current.begin(event.nativeEvent.pointerId)
-    const capture = captureNativePointer(event.nativeEvent)
-    if (capture !== null) pointerCaptureRef.current.set(event.nativeEvent.pointerId, capture)
+    const native = event.nativeEvent
+    if (nativeSurfacePointersRef.current.has(native.pointerId)) return
+    pointerTrackerRef.current.begin(native.pointerId)
+    const capture = captureNativePointer(native)
+    if (capture !== null) pointerCaptureRef.current.set(native.pointerId, capture)
     const hit = notifySurfacePointer('down', event)
-    if (hit !== null) onSurfaceHit(hit, event.nativeEvent.shiftKey)
-  }, [notifySurfacePointer, onSurfaceHit])
+    if (hit !== null) {
+      // Touch pointers remain available for one-finger OrbitControls camera
+      // navigation. Mouse/pen primary drags over a surface are the explicit
+      // select-box gesture and must stop the native controls listener before
+      // it can rotate the camera.
+      if (surfaceInteractionMode === 'select' && native.button === 0 && native.pointerType !== 'touch') {
+        beginSurfacePointer(native.pointerId)
+        native.stopImmediatePropagation()
+      }
+      onSurfaceHit(hit, native.shiftKey)
+    }
+  }, [beginSurfacePointer, notifySurfacePointer, onSurfaceHit, surfaceInteractionMode])
 
   const handlePointerUp = useCallback((event: ThreeEvent<PointerEvent>) => {
-    if (!pointerTrackerRef.current.finish(event.nativeEvent.pointerId)) return
-    const capture = pointerCaptureRef.current.get(event.nativeEvent.pointerId) ?? null
-    pointerCaptureRef.current.delete(event.nativeEvent.pointerId)
-    releaseNativePointer(capture, event.nativeEvent.pointerId)
+    const native = event.nativeEvent
+    if (nativeSurfacePointersRef.current.has(native.pointerId)) return
+    if (!pointerTrackerRef.current.finish(native.pointerId)) return
+    finishSurfacePointer(native.pointerId)
+    const capture = pointerCaptureRef.current.get(native.pointerId) ?? null
+    pointerCaptureRef.current.delete(native.pointerId)
+    releaseNativePointer(capture, native.pointerId)
     notifySurfacePointer('up', event)
-  }, [notifySurfacePointer])
+  }, [finishSurfacePointer, notifySurfacePointer])
 
   const handlePointerCancel = useCallback((event: ThreeEvent<PointerEvent>) => {
-    if (!pointerTrackerRef.current.finish(event.nativeEvent.pointerId)) return
-    const capture = pointerCaptureRef.current.get(event.nativeEvent.pointerId) ?? null
-    pointerCaptureRef.current.delete(event.nativeEvent.pointerId)
-    releaseNativePointer(capture, event.nativeEvent.pointerId)
+    const native = event.nativeEvent
+    if (nativeSurfacePointersRef.current.has(native.pointerId)) return
+    if (!pointerTrackerRef.current.finish(native.pointerId)) return
+    finishSurfacePointer(native.pointerId)
+    const capture = pointerCaptureRef.current.get(native.pointerId) ?? null
+    pointerCaptureRef.current.delete(native.pointerId)
+    releaseNativePointer(capture, native.pointerId)
     notifySurfacePointer('cancel', event)
-  }, [notifySurfacePointer])
+  }, [finishSurfacePointer, notifySurfacePointer])
 
   return (
     <>
@@ -472,12 +748,13 @@ function ViewerScene({ model, progress, cameraMode, renderMode, surfaceInteracti
         ? <OrthographicCamera key="orthographic" makeDefault position={cameraPosition} near={fit.near} far={fit.far} left={orthographicFrustum.left} right={orthographicFrustum.right} top={orthographicFrustum.top} bottom={orthographicFrustum.bottom} zoom={1} />
         : <PerspectiveCamera key="perspective" makeDefault position={cameraPosition} near={fit.near} far={fit.far} fov={42} />}
       <OrbitControls
+        ref={orbitControlsRef}
         key={`controls-${cameraMode}`}
         makeDefault
         enabled={orbitControlsEnabled}
         target={cameraTarget}
-        enableDamping
-        dampingFactor={0.08}
+        enableDamping={orbitControlsConfig.enableDamping}
+        dampingFactor={orbitControlsConfig.dampingFactor}
         enablePan
         enableZoom
         minDistance={Math.max(0.5, normalisedFrame.radius * 0.18)}
@@ -518,10 +795,10 @@ function ScaleOverlay({ metrics }: { metrics: ViewerCameraMetrics | null }): Rea
 function ViewModeButtons({ cameraMode, renderMode, onCameraModeChange, onRenderModeChange }: { cameraMode: ViewerCameraMode; renderMode: ViewerRenderMode; onCameraModeChange: (mode: ViewerCameraMode) => void; onRenderModeChange: (mode: ViewerRenderMode) => void }): ReactNode {
   const buttonStyle: CSSProperties = { border: '1px solid rgba(55,86,81,.22)', borderRadius: 7, padding: '6px 8px', background: 'rgba(255,255,255,.9)', color: '#2b4843', cursor: 'pointer', font: 'inherit' }
   return <div role="toolbar" aria-label="Viewer display controls" style={{ ...overlayStyle, top: 14, left: '50%', transform: 'translateX(-50%)', display: 'flex', gap: 5, pointerEvents: 'auto' }}>
-    <button type="button" style={{ ...buttonStyle, fontWeight: cameraMode === 'perspective' ? 700 : 400 }} aria-pressed={cameraMode === 'perspective'} onClick={() => { onCameraModeChange('perspective') }}>3D</button>
-    <button type="button" style={{ ...buttonStyle, fontWeight: cameraMode === 'orthographic' ? 700 : 400 }} aria-pressed={cameraMode === 'orthographic'} onClick={() => { onCameraModeChange('orthographic') }}>Top</button>
-    <button type="button" style={{ ...buttonStyle, fontWeight: renderMode === 'texture' ? 700 : 400 }} aria-pressed={renderMode === 'texture'} onClick={() => { onRenderModeChange('texture') }}>Texture</button>
-    <button type="button" style={{ ...buttonStyle, fontWeight: renderMode === 'wireframe' ? 700 : 400 }} aria-pressed={renderMode === 'wireframe'} onClick={() => { onRenderModeChange('wireframe') }}>Wire</button>
+    <button type="button" className="viewer-control-button" style={{ ...buttonStyle, fontWeight: cameraMode === 'perspective' ? 700 : 400 }} aria-pressed={cameraMode === 'perspective'} onClick={() => { onCameraModeChange('perspective') }}>3D</button>
+    <button type="button" className="viewer-control-button" style={{ ...buttonStyle, fontWeight: cameraMode === 'orthographic' ? 700 : 400 }} aria-pressed={cameraMode === 'orthographic'} onClick={() => { onCameraModeChange('orthographic') }}>Top</button>
+    <button type="button" className="viewer-control-button" style={{ ...buttonStyle, fontWeight: renderMode === 'texture' ? 700 : 400 }} aria-pressed={renderMode === 'texture'} onClick={() => { onRenderModeChange('texture') }}>Texture</button>
+    <button type="button" className="viewer-control-button" style={{ ...buttonStyle, fontWeight: renderMode === 'wireframe' ? 700 : 400 }} aria-pressed={renderMode === 'wireframe'} onClick={() => { onRenderModeChange('wireframe') }}>Wire</button>
   </div>
 }
 
@@ -551,6 +828,7 @@ export function Viewer(props: ViewerProps): ReactNode {
     onSurfaceSelect,
     onSurfacePointer,
     surfaceInteractionMode = 'select',
+    surfaceGestureActive = false,
   } = props
   const [internalCameraMode, setInternalCameraMode] = useState<ViewerCameraMode>(defaultCameraMode)
   const [internalRenderMode, setInternalRenderMode] = useState<ViewerRenderMode>(defaultRenderMode)
@@ -705,12 +983,12 @@ export function Viewer(props: ViewerProps): ReactNode {
 
   const mergedStyle = { ...viewerStyle, ...style }
   if (!webglAvailable) {
-    return <div className={className} style={mergedStyle} role="alert" aria-label="WebGL unavailable">WebGL is unavailable in this browser. Enable hardware acceleration to view the site model.</div>
+    return <div className={`pv-viewer ${className ?? ''}`.trim()} style={mergedStyle} role="alert" aria-label="WebGL unavailable">WebGL is unavailable in this browser. Enable hardware acceleration to view the site model.</div>
   }
   return (
-    <div className={className} style={mergedStyle} aria-label={ariaLabel} data-testid="pv-viewer">
-      <Canvas {...createViewerCanvasConfig(typeof window === 'undefined' ? 1 : window.devicePixelRatio)} shadows={shadows} gl={{ antialias: true, alpha: false, powerPreference: 'high-performance' }} onPointerMissed={clearSelection}>
-        {model !== null && <ViewerScene model={model} progress={progress} cameraMode={cameraMode} renderMode={renderMode} surfaceInteractionMode={surfaceInteractionMode} showGrid={showGrid} sceneContent={<>{sceneContent}{children}</>} shadows={shadows} selected={selected} onSurfaceHit={handleSurfaceHit} onSurfacePointer={handleSurfacePointer} onSurfaceMiss={clearSelection} onCameraMetrics={setCameraMetrics} />}
+    <div className={`pv-viewer ${className ?? ''}`.trim()} style={mergedStyle} aria-label={ariaLabel} data-testid="pv-viewer">
+      <Canvas className="pv-viewer__canvas" {...createViewerCanvasConfig(typeof window === 'undefined' ? 1 : window.devicePixelRatio)} shadows={shadows} gl={{ antialias: true, alpha: false, powerPreference: 'high-performance' }} onPointerMissed={clearSelection}>
+        {model !== null && <ViewerScene model={model} progress={progress} cameraMode={cameraMode} renderMode={renderMode} surfaceInteractionMode={surfaceInteractionMode} surfaceGestureActive={surfaceGestureActive} showGrid={showGrid} sceneContent={<>{sceneContent}{children}</>} shadows={shadows} selected={selected} onSurfaceHit={handleSurfaceHit} onSurfacePointer={handleSurfacePointer} onSurfaceMiss={clearSelection} onCameraMetrics={setCameraMetrics} />}
       </Canvas>
       {model !== null && <MetadataOverlay metadata={model.loaded.metadata} />}
       <ViewModeButtons cameraMode={cameraMode} renderMode={renderMode} onCameraModeChange={setCameraMode} onRenderModeChange={setRenderMode} />

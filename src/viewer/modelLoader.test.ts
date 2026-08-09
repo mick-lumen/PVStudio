@@ -3,7 +3,7 @@ import * as THREE from 'three'
 import { TextureLoader } from 'three'
 import { MTLLoader } from 'three/examples/jsm/loaders/MTLLoader.js'
 import { buildViewerObject, createViewerResourceRegistry, loadViewerModel, resourceBaseUrl, waitForMaterialTextures } from './modelLoader'
-import type { ParsedObjDocument } from './objParser'
+import type { ObjDocumentBounds, ParsedObjDocument } from './objParser'
 import { disposeViewerObject } from './renderMode'
 
 describe('viewer resource mapping and model loading', () => {
@@ -126,6 +126,27 @@ describe('viewer resource mapping and model loading', () => {
     loaded.dispose()
   })
 
+  it('uses referenced bounds for provisional and final frames when source vertices are unused', async () => {
+    let provisionalBounds: ObjDocumentBounds | undefined
+    const loaded = await loadViewerModel({
+      name: 'Outlier bounds fixture',
+      obj: [
+        'v 0 0 0',
+        'v 1 0 0',
+        'v 0 0 1',
+        'v 1000 1000 1000',
+        'f 1 2 3',
+      ].join('\n'),
+    }, {
+      onObjectReady: (_object, _dispose, bounds) => { provisionalBounds = bounds },
+    })
+
+    expect(provisionalBounds).toEqual({ min: { x: 0, y: 0, z: 0 }, max: { x: 1, y: 0, z: 1 } })
+    expect(loaded.metadata.boundingBox.max).toEqual({ x: 1, y: 0, z: 1 })
+    expect(loaded.metadata.sourceBounds?.max).toEqual({ x: 1000, y: 1000, z: 1000 })
+    loaded.dispose()
+  })
+
   it('disposes the object when metadata aborts after object publication', async () => {
     const controller = new AbortController()
     const geometryDispose = vi.spyOn(THREE.BufferGeometry.prototype, 'dispose')
@@ -169,6 +190,132 @@ describe('viewer resource mapping and model loading', () => {
     loaded.dispose()
   })
 
+  it('deduplicates repeated textured OBJ tuples into indexed geometry', () => {
+    const triangleCount = 50_001
+    const corners = triangleCount * 3
+    const indices = new Uint32Array(corners)
+    const uvIndices = new Int32Array(corners)
+    for (let corner = 0; corner < corners; corner += 3) {
+      indices[corner] = 0
+      indices[corner + 1] = 1
+      indices[corner + 2] = 2
+      uvIndices[corner] = 0
+      uvIndices[corner + 1] = 1
+      uvIndices[corner + 2] = 2
+    }
+    const parsed: ParsedObjDocument = {
+      positions: new Float32Array([0, 0, 0, 2, 0, 0, 0, 0, 2]),
+      texcoords: new Float32Array([0, 0, 1, 0, 0, 1]),
+      normals: new Float32Array(),
+      bounds: { min: { x: 0, y: 0, z: 0 }, max: { x: 2, y: 0, z: 2 } },
+      groups: [{ name: 'roof', materialName: null, indices, uvIndices, normalIndices: new Int32Array() }],
+    }
+    const object = buildViewerObject(parsed, undefined, 'indexed-textured')
+    try {
+      const mesh = object.children[0]
+      expect(mesh).toBeInstanceOf(THREE.Mesh)
+      if (!(mesh instanceof THREE.Mesh)) return
+      const geometry = mesh.geometry as THREE.BufferGeometry
+      const position = geometry.getAttribute('position') as THREE.BufferAttribute
+      const uv = geometry.getAttribute('uv') as THREE.BufferAttribute
+      const index = geometry.getIndex()
+      expect(position.count).toBe(3)
+      expect(uv.count).toBe(3)
+      expect(index?.count).toBe(corners)
+      // Telemetry-style regression: repeated tuples avoid one vertex per face
+      // corner, while the index stream still represents every source triangle.
+      expect(position.count).toBeLessThan(corners)
+      expect(corners - position.count).toBe(corners - 3)
+      expect(Array.from(uv.array)).toEqual([0, 0, 1, 0, 0, 1])
+      expect(mesh.material).toBeInstanceOf(THREE.MeshBasicMaterial)
+    } finally {
+      disposeViewerObject(object)
+    }
+  })
+
+  it('keeps UV and normal seams distinct while sharing exact repeated tuples', () => {
+    const parsed: ParsedObjDocument = {
+      positions: new Float32Array([0, 0, 0, 1, 0, 0, 1, 0, 1, 0, 0, 1]),
+      texcoords: new Float32Array([0, 0, 1, 0, 1, 1, 0, 1, 0.5, 0.5]),
+      normals: new Float32Array([0, 1, 0, 0, 0, 1]),
+      bounds: { min: { x: 0, y: 0, z: 0 }, max: { x: 1, y: 0, z: 1 } },
+      sourceCounts: { vertexCount: 4, texcoordCount: 5, normalCount: 2, polygonCount: 2, cornerCount: 6 },
+      groups: [{
+        name: 'roof',
+        materialName: null,
+        indices: new Uint32Array([0, 1, 2, 0, 2, 3]),
+        uvIndices: new Int32Array([0, 1, 2, 4, 2, 3]),
+        normalIndices: new Int32Array([0, 0, 0, 1, 1, 1]),
+      }],
+    }
+    const object = buildViewerObject(parsed, undefined, 'seamed-texture')
+    try {
+      const mesh = object.children[0]
+      expect(mesh).toBeInstanceOf(THREE.Mesh)
+      if (!(mesh instanceof THREE.Mesh)) return
+      const geometry = mesh.geometry as THREE.BufferGeometry
+      const position = geometry.getAttribute('position') as THREE.BufferAttribute
+      const uv = geometry.getAttribute('uv') as THREE.BufferAttribute
+      const normal = geometry.getAttribute('normal') as THREE.BufferAttribute
+      expect(position.count).toBe(6)
+      expect(uv.count).toBe(position.count)
+      expect(normal.count).toBe(position.count)
+      expect(Array.from(normal.array)).toEqual([
+        0, 1, 0,
+        0, 1, 0,
+        0, 1, 0,
+        0, 0, 1,
+        0, 0, 1,
+        0, 0, 1,
+      ])
+      expect(geometry.getIndex()?.count).toBe(6)
+    } finally {
+      disposeViewerObject(object)
+    }
+  })
+
+  it('preserves explicit normals while filling missing corners consistently for small and large groups', () => {
+    const triangleCount = 50_001
+    const createParsed = (count: number): ParsedObjDocument => {
+      const indices = new Uint32Array(count * 3)
+      const normalIndices = new Int32Array(count * 3)
+      for (let corner = 0; corner < indices.length; corner += 3) {
+        indices[corner] = 0
+        indices[corner + 1] = 1
+        indices[corner + 2] = 2
+        normalIndices[corner] = 0
+        normalIndices[corner + 1] = -1
+        normalIndices[corner + 2] = 1
+      }
+      return {
+        positions: new Float32Array([0, 0, 0, 1, 0, 0, 0, 0, 1]),
+        texcoords: new Float32Array(),
+        normals: new Float32Array([1, 0, 0, 0, 0, 1]),
+        bounds: { min: { x: 0, y: 0, z: 0 }, max: { x: 1, y: 0, z: 1 } },
+        groups: [{ name: 'mixed', materialName: null, indices, uvIndices: new Int32Array(), normalIndices }],
+      }
+    }
+    const small = buildViewerObject(createParsed(1), undefined, 'mixed-small')
+    const large = buildViewerObject(createParsed(triangleCount), undefined, 'mixed-large')
+    try {
+      const smallMesh = small.children[0]
+      const largeMesh = large.children[0]
+      expect(smallMesh).toBeInstanceOf(THREE.Mesh)
+      expect(largeMesh).toBeInstanceOf(THREE.Mesh)
+      if (!(smallMesh instanceof THREE.Mesh) || !(largeMesh instanceof THREE.Mesh)) return
+      const smallGeometry = smallMesh.geometry as THREE.BufferGeometry
+      const largeGeometry = largeMesh.geometry as THREE.BufferGeometry
+      const smallNormal = smallGeometry.getAttribute('normal') as THREE.BufferAttribute
+      const largeNormal = largeGeometry.getAttribute('normal') as THREE.BufferAttribute
+      expect(Array.from(smallNormal.array).slice(0, 9)).toEqual([1, 0, 0, 0, -1, 0, 0, 0, 1])
+      expect(Array.from(largeNormal.array).slice(0, 9)).toEqual(Array.from(smallNormal.array).slice(0, 9))
+      expect(largeGeometry.getIndex()?.count).toBe(triangleCount * 3)
+    } finally {
+      disposeViewerObject(small)
+      disposeViewerObject(large)
+    }
+  })
+
   it('uses a double-sided flat fallback for large no-normal OBJ faces', () => {
     const triangleCount = 50_001
     const indices = new Uint32Array(triangleCount * 3)
@@ -184,6 +331,7 @@ describe('viewer resource mapping and model loading', () => {
       texcoords: new Float32Array(),
       normals: new Float32Array(),
       bounds: { min: { x: 0, y: 0, z: 0 }, max: { x: 1, y: 0, z: 1 } },
+      sourceCounts: { vertexCount: 3, texcoordCount: 0, normalCount: 0, polygonCount: triangleCount, cornerCount: triangleCount * 3 },
       groups: [{ name: 'roof', materialName: null, indices, uvIndices: new Int32Array(), normalIndices: new Int32Array() }],
     }
     const object = buildViewerObject(parsed, undefined, 'large-no-normal')
@@ -220,6 +368,7 @@ describe('viewer resource mapping and model loading', () => {
       texcoords: new Float32Array(),
       normals: new Float32Array(),
       bounds: { min: { x: 0, y: 0, z: 0 }, max: { x: 1, y: 0, z: 1 } },
+      sourceCounts: { vertexCount: 3, texcoordCount: 0, normalCount: 0, polygonCount: triangleCount, cornerCount: triangleCount * 3 },
       groups: [{ name: 'roof', materialName: 'Roof', indices, uvIndices: new Int32Array(), normalIndices: new Int32Array() }],
     }
     const map = new THREE.Texture()
@@ -242,6 +391,71 @@ describe('viewer resource mapping and model loading', () => {
     } finally {
       disposeViewerObject(object)
       imported.dispose()
+    }
+  })
+
+  it('disposes detached large-model MTL materials and shared maps exactly once', async () => {
+    const triangleCount = 50_001
+    const faces = Array.from({ length: triangleCount }, () => 'f 1 3 2').join('\n')
+    const map = new THREE.Texture()
+    const imported = new THREE.MeshPhongMaterial({ map })
+    const materialDispose = vi.spyOn(imported, 'dispose')
+    const textureDispose = vi.spyOn(map, 'dispose')
+    vi.spyOn(MTLLoader.prototype, 'parse').mockReturnValue({
+      materials: { Roof: imported },
+      preload: (): void => undefined,
+      create: vi.fn(() => imported),
+    } as unknown as ReturnType<MTLLoader['parse']>)
+
+    try {
+      const loaded = await loadViewerModel({
+        name: 'Large MTL ownership',
+        obj: ['v 0 0 0', 'v 1 0 0', 'v 0 0 1', 'usemtl Roof', faces].join('\n'),
+        mtl: 'newmtl Roof',
+      })
+      loaded.dispose()
+      loaded.dispose()
+      expect(materialDispose).toHaveBeenCalledTimes(1)
+      expect(textureDispose).toHaveBeenCalledTimes(1)
+    } finally {
+      materialDispose.mockRestore()
+      textureDispose.mockRestore()
+      map.dispose()
+    }
+  })
+
+  it('disposes detached normal maps when the large flat clone carries only color maps', async () => {
+    const triangleCount = 50_001
+    const faces = Array.from({ length: triangleCount }, () => 'f 1 3 2').join('\n')
+    const map = new THREE.Texture()
+    const normalMap = new THREE.Texture()
+    const imported = new THREE.MeshPhongMaterial({ map, normalMap })
+    const materialDispose = vi.spyOn(imported, 'dispose')
+    const mapDispose = vi.spyOn(map, 'dispose')
+    const normalMapDispose = vi.spyOn(normalMap, 'dispose')
+    vi.spyOn(MTLLoader.prototype, 'parse').mockReturnValue({
+      materials: { Roof: imported },
+      preload: (): void => undefined,
+      create: vi.fn(() => imported),
+    } as unknown as ReturnType<MTLLoader['parse']>)
+
+    try {
+      const loaded = await loadViewerModel({
+        name: 'Large MTL normal-map ownership',
+        obj: ['v 0 0 0', 'v 1 0 0', 'v 0 0 1', 'usemtl Roof', faces].join('\n'),
+        mtl: 'newmtl Roof',
+      })
+      loaded.dispose()
+      loaded.dispose()
+      expect(materialDispose).toHaveBeenCalledTimes(1)
+      expect(mapDispose).toHaveBeenCalledTimes(1)
+      expect(normalMapDispose).toHaveBeenCalledTimes(1)
+    } finally {
+      materialDispose.mockRestore()
+      mapDispose.mockRestore()
+      normalMapDispose.mockRestore()
+      map.dispose()
+      normalMap.dispose()
     }
   })
 
@@ -280,6 +494,29 @@ describe('viewer resource mapping and model loading', () => {
 
     await waitForMaterialTextures(creator, manager)
     expect(finished).toBe(true)
+  })
+
+  it('aborts a hanging material preload and restores manager callbacks', async () => {
+    const manager = new THREE.LoadingManager()
+    const previousLoad = manager.onLoad
+    const previousStart = manager.onStart
+    const previousItemStart = manager.itemStart
+    const previousItemEnd = manager.itemEnd
+    const previousItemError = manager.itemError
+    const controller = new AbortController()
+    const creator = {
+      materials: {},
+      preload: (): void => { manager.itemStart('never-completes.jpg') },
+    }
+    const pending = waitForMaterialTextures(creator, manager, controller.signal)
+    await new Promise<void>((resolve) => { setTimeout(resolve, 0) })
+    controller.abort()
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' })
+    expect(manager.onLoad).toBe(previousLoad)
+    expect(manager.onStart).toBe(previousStart)
+    expect(manager.itemStart).toBe(previousItemStart)
+    expect(manager.itemEnd).toBe(previousItemEnd)
+    expect(manager.itemError).toBe(previousItemError)
   })
 
   it('disposes a built object when metadata aborts after finalising', async () => {
@@ -322,5 +559,119 @@ describe('viewer resource mapping and model loading', () => {
     })).rejects.toThrow('preload failed')
     expect(materialDispose).toHaveBeenCalledTimes(1)
     expect(textureDispose).toHaveBeenCalledTimes(1)
+  })
+
+  it('accepts legacy worker responses with omitted lengths, counts, and bounds', async () => {
+    class LegacyWorker {
+      public static latest: LegacyWorker | undefined
+      public onmessage: ((event: MessageEvent<unknown>) => void) | null = null
+      public onerror: ((event: ErrorEvent) => void) | null = null
+      public terminated = false
+
+      public constructor() {
+        LegacyWorker.latest = this
+      }
+
+      public postMessage(): void {
+        const positions = new Float32Array([0, 0, 0, 1, 0, 0, 0, 0, 1]).buffer
+        const texcoords = new Float32Array().buffer
+        const normals = new Float32Array().buffer
+        const indices = new Uint32Array([0, 1, 2]).buffer
+        const empty = new Int32Array().buffer
+        this.onmessage?.({
+          data: {
+            type: 'result',
+            positions,
+            texcoords,
+            normals,
+            groups: [{ name: 'Roof', materialName: null, indices, uvIndices: empty, normalIndices: empty }],
+          },
+        } as MessageEvent<unknown>)
+      }
+
+      public terminate(): void {
+        this.terminated = true
+      }
+    }
+
+    vi.stubGlobal('Worker', LegacyWorker)
+    try {
+      const loaded = await loadViewerModel({ obj: 'v 0 0 0\nv 1 0 0\nv 0 0 1\nf 1 2 3' })
+      expect(loaded.metadata.sourceVertexCount).toBe(3)
+      expect(loaded.metadata.sourcePolygonCount).toBe(1)
+      expect(loaded.metadata.boundingBox.max).toEqual({ x: 1, y: 0, z: 1 })
+      expect(loaded.metadata.boundingBox.size).toEqual({ x: 1, y: 0, z: 1 })
+      expect(LegacyWorker.latest?.terminated).toBe(true)
+      loaded.dispose()
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('rejects malformed worker lengths and always terminates the worker', async () => {
+    class MalformedWorker {
+      public static latest: MalformedWorker | undefined
+      public onmessage: ((event: MessageEvent<unknown>) => void) | null = null
+      public onerror: ((event: ErrorEvent) => void) | null = null
+      public terminated = false
+
+      public constructor() {
+        MalformedWorker.latest = this
+      }
+
+      public postMessage(): void {
+        this.onmessage?.({
+          data: {
+            type: 'result',
+            positions: new Float32Array([0, 0, 0]).buffer,
+            positionsLength: 10,
+            texcoords: new ArrayBuffer(0),
+            normals: new ArrayBuffer(0),
+            groups: [],
+          },
+        } as MessageEvent<unknown>)
+      }
+
+      public terminate(): void {
+        this.terminated = true
+      }
+    }
+
+    vi.stubGlobal('Worker', MalformedWorker)
+    try {
+      await expect(loadViewerModel({ obj: 'v 0 0 0\nv 1 0 0\nv 0 0 1\nf 1 2 3' })).rejects.toThrow('malformed attribute buffers')
+      expect(MalformedWorker.latest?.terminated).toBe(true)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('rejects a worker postMessage throw and terminates the worker', async () => {
+    class ThrowingWorker {
+      public static latest: ThrowingWorker | undefined
+      public onmessage: ((event: MessageEvent<unknown>) => void) | null = null
+      public onerror: ((event: ErrorEvent) => void) | null = null
+      public terminated = false
+
+      public constructor() {
+        ThrowingWorker.latest = this
+      }
+
+      public postMessage(): void {
+        throw new Error('postMessage failed')
+      }
+
+      public terminate(): void {
+        this.terminated = true
+      }
+    }
+
+    vi.stubGlobal('Worker', ThrowingWorker)
+    try {
+      await expect(loadViewerModel({ obj: 'v 0 0 0\nv 1 0 0\nv 0 0 1\nf 1 2 3' })).rejects.toThrow('postMessage failed')
+      expect(ThrowingWorker.latest?.terminated).toBe(true)
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 })

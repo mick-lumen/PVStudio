@@ -1,8 +1,10 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { isValidElement, type ReactElement, type ReactNode } from 'react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { isValidElement, useCallback, useState, useSyncExternalStore, type ReactElement, type ReactNode } from 'react'
 import { describe, expect, it, vi } from 'vitest'
-import type { PanelPlacement, SurfaceDescriptor } from './core'
+import type { PanelDefinition, PanelGroupSettings, PanelPlacement, SurfaceDescriptor } from './core'
+import { createPlacementStore, editableGroupIdFor } from './placement'
 import type { PanelPointerInfo } from './rendering'
+import { Shell, type AlignPreviewState } from './shell/Shell'
 import type { ViewerProps, ViewerResource, ViewerSurfacePointerEvent } from './viewer'
 
 vi.mock('./viewer', () => {
@@ -21,7 +23,7 @@ vi.mock('./viewer', () => {
     usableArea: 27,
     faceRefs: [{ meshId: 'roof', faceIndices: [0] }],
   }
-  type MockViewerProps = Pick<ViewerProps, 'source' | 'cameraMode' | 'onCameraModeChange' | 'renderMode' | 'onRenderModeChange' | 'onSurfacesChange' | 'onSurfaceSelect' | 'onSurfacePointer' | 'sceneContent'>
+  type MockViewerProps = Pick<ViewerProps, 'source' | 'cameraMode' | 'onCameraModeChange' | 'renderMode' | 'onRenderModeChange' | 'onSurfacesChange' | 'onSurfaceSelect' | 'onSurfacePointer' | 'sceneContent' | 'surfaceGestureActive'>
   type LayerProps = {
     readonly placements?: readonly PanelPlacement[]
     readonly interactionsEnabled?: boolean
@@ -78,6 +80,7 @@ vi.mock('./viewer', () => {
       <output data-testid="mock-placement-ids">{layer?.props.placements?.map((placement) => placement.id).join(',') ?? ''}</output>
       <output data-testid="mock-placement-centers">{layer?.props.placements?.map((placement) => `${placement.id}:${placement.localCenter.x.toFixed(2)},${placement.localCenter.y.toFixed(2)}`).join('|') ?? ''}</output>
       <output data-testid="mock-panel-interactions">{layer?.props.interactionsEnabled === false ? 'disabled' : 'enabled'}</output>
+      <output data-testid="mock-surface-gesture">{props.surfaceGestureActive ? 'active' : 'idle'}</output>
       <button
         type="button"
         onClick={() => {
@@ -103,6 +106,9 @@ vi.mock('./viewer', () => {
         emitSurface(props)
         emitSurface(props)
       }}>Repeat roof surfaces</button>
+      <button type="button" onClick={() => {
+        props.onSurfacesChange?.([{ ...surface, area: 33, usableArea: 28 }])
+      }}>Refresh roof surface</button>
       <button type="button" onClick={() => { emitPointer(props, pointer('move', 4, 2, false, 0)) }}>Hover surface pointer</button>
       <button type="button" onClick={() => { emitPointer(props, pointer('down', 4, 2)) }}>Start surface pointer</button>
       <button type="button" onClick={() => { emitPointer(props, pointer('down', 0, 0)) }}>Start invalid surface pointer</button>
@@ -152,6 +158,9 @@ vi.mock('./viewer', () => {
         emitPointer(props, pointer('move', 8, 4))
         emitPointer(props, pointer('up', 8, 4))
       }}>Select surface box</button>
+      <button type="button" onClick={() => { emitPointer(props, pointer('down', 1, 1)) }}>Start selection box gesture</button>
+      <button type="button" onClick={() => { emitPointer(props, pointer('up', 1, 1)) }}>Finish selection box gesture</button>
+      <button type="button" onClick={() => { emitPointer(props, pointer('cancel', 1, 1)) }}>Cancel selection box gesture</button>
       <button type="button" onClick={() => {
         const placement = layer?.props.placements?.[0]
         if (placement === undefined || layer === null) return
@@ -164,6 +173,123 @@ vi.mock('./viewer', () => {
   }
   return { Viewer: MockViewer }
 })
+
+const ALIGN_SETTINGS: PanelGroupSettings = {
+  orientation: 'portrait',
+  interPanelSpacingM: 0.02,
+  rowSpacingM: 0.03,
+  setbackM: 0.2,
+  clearanceM: 0.1,
+  tiltDeg: 0,
+}
+
+/**
+ * A small controlled shell fixture keeps this UI contract test independent of
+ * the full App/Three.js scene setup. App-level placement and store behaviour
+ * remain covered by the neighbouring integration tests and placement tests.
+ */
+const AlignInspectorHarness = (): ReactNode => {
+  const [settings, setSettings] = useState<PanelGroupSettings>(ALIGN_SETTINGS)
+  const [alignStage, setAlignStage] = useState<'idle' | 'confirm'>('idle')
+  const [alignPreview, setAlignPreview] = useState<AlignPreviewState>({ candidateCount: 3, valid: true })
+  return (
+    <Shell
+      settings={settings}
+      settingsScopeLabel="Group array-1"
+      onSettingsChange={(patch) => { setSettings((current) => ({ ...current, ...patch })) }}
+      selectedPlacementIds={['panel-1', 'panel-2', 'panel-3']}
+      placementSummary={{ count: 3, selectedCount: 3, previewCount: 0, draggingCount: 0, totalWattageW: 1620 }}
+      alignStage={alignStage}
+      alignPreview={alignPreview}
+      onAlignStart={() => { setAlignStage('confirm') }}
+      onAlignConfirm={() => {
+        setAlignPreview({ candidateCount: 3, valid: false, reason: 'Panels overlap after alignment.' })
+        setAlignStage('idle')
+      }}
+      onAlignCancel={() => { setAlignStage('idle') }}
+      webglAvailable
+    />
+  )
+}
+
+const BRIDGE_PANEL: PanelDefinition = {
+  id: 'bridge-panel',
+  manufacturer: 'PV Studio',
+  model: 'Bridge panel',
+  widthM: 1,
+  heightM: 2,
+  thicknessM: 0.035,
+  wattageW: 400,
+  weightKg: 20,
+}
+
+const BRIDGE_SURFACE: SurfaceDescriptor = {
+  id: 'bridge-roof',
+  frame: {
+    origin: { x: 0, y: 0, z: 0 },
+    normal: { x: 0, y: 0, z: 1 },
+    tangentX: { x: 1, y: 0, z: 0 },
+    tangentY: { x: 0, y: 1, z: 0 },
+  },
+  region: { x: 0, y: 0, width: 8, height: 4 },
+  area: 32,
+  azimuthDeg: 90,
+  tiltDeg: 25,
+  usableArea: 27,
+  faceRefs: [{ meshId: 'bridge-roof', faceIndices: [0] }],
+}
+
+const BRIDGE_PLACEMENT: PanelPlacement = {
+  id: 'bridge-placement',
+  panelId: BRIDGE_PANEL.id,
+  surfaceId: BRIDGE_SURFACE.id,
+  localCenter: { x: 2, y: 2 },
+  orientation: 'portrait',
+  clearanceM: 0.1,
+  tiltDeg: 0,
+  groupId: 'array-bridge',
+}
+
+/**
+ * Exercises the same settings callback contract as App with a tiny store.
+ * Full App placement and source integration remain covered by neighbouring
+ * tests; this keeps the scope-routing regression independent of the viewer.
+ */
+const SettingsBridgeHarness = (): ReactNode => {
+  const [store] = useState(() => createPlacementStore({
+    panels: [BRIDGE_PANEL],
+    surfaces: [BRIDGE_SURFACE],
+    initial: {
+      placements: { [BRIDGE_PLACEMENT.id]: BRIDGE_PLACEMENT },
+      selectedIds: [BRIDGE_PLACEMENT.id],
+    },
+  }))
+  const subscribe = useCallback((listener: () => void): (() => void) => store.subscribe(listener), [store])
+  const getSnapshot = useCallback(() => store.getSnapshot(), [store])
+  const state = useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
+  const groupId = editableGroupIdFor(state)
+  const settings = groupId === undefined ? state.settings : store.getGroupSettings(groupId)
+  const settingsScopeLabel = groupId === undefined ? 'Global defaults' : `Group ${groupId}`
+  const onSettingsChange = useCallback((patch: Partial<PanelGroupSettings>): void => {
+    if (groupId === undefined) store.setSettings(patch)
+    else store.setGroupSettings(groupId, patch)
+  }, [groupId, store])
+  return (
+    <>
+      <button type="button" onClick={() => { store.selectPanels([]) }}>Clear selected group</button>
+      <button type="button" onClick={() => { store.selectPanels([BRIDGE_PLACEMENT.id]) }}>Select bridge group</button>
+      <output data-testid="bridge-settings">{JSON.stringify(settings)}</output>
+      <Shell
+        settings={settings}
+        settingsScopeLabel={settingsScopeLabel}
+        onSettingsChange={onSettingsChange}
+        selectedPlacementIds={state.selectedIds}
+        placementSummary={{ count: Object.keys(state.placements).length, selectedCount: state.selectedIds.length, previewCount: 0, draggingCount: 0, totalWattageW: 400 }}
+        webglAvailable
+      />
+    </>
+  )
+}
 
 import { App } from './App'
 
@@ -226,7 +352,7 @@ describe('App', () => {
   it('loads the checked-in WebODM fixture through the real URL source without opening the picker', () => {
     render(<App webglAvailable />)
     const filePickerClick = vi.spyOn(HTMLInputElement.prototype, 'click')
-    fireEvent.click(screen.getByRole('button', { name: 'Load sample WebODM house' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Try WebODM sample' }))
 
     expect(filePickerClick).not.toHaveBeenCalled()
     expect(screen.getByTestId('mock-source')).toHaveTextContent(
@@ -270,6 +396,21 @@ describe('App', () => {
     await waitFor(() => {
       expect(screen.getByText(/Panel layout: 1 panel/)).toBeInTheDocument()
     })
+  })
+
+  it('preserves an authored surface edge when the viewer refreshes the same surface descriptor', () => {
+    render(<App webglAvailable />)
+    fireEvent.click(screen.getByRole('button', { name: 'Activate roof surface' }))
+    fireEvent.click(screen.getByRole('tab', { name: 'Inspector' }))
+
+    const edgeType = screen.getByRole('combobox', { name: 'Surface edge type' })
+    fireEvent.change(edgeType, { target: { value: 'gutter' } })
+    expect(edgeType).toHaveValue('gutter')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh roof surface' }))
+
+    expect(screen.getByRole('combobox', { name: 'Surface edge type' })).toHaveValue('gutter')
+    expect(screen.getByTestId('surface-edge-path')).toHaveTextContent('Surface roof-east › Gutter')
   })
 
   it('places a selected catalogue panel on a viewer surface and reports kWp', async () => {
@@ -385,6 +526,30 @@ describe('App', () => {
       const layout = screen.getByText(/Panel layout: \d+ panels/)
       expect(layout.textContent).not.toMatch(/Panel layout: 0 panels/)
     })
+  })
+
+  it('shows and edits the generated array group scope in the inspector', async () => {
+    render(<App webglAvailable />)
+    fireEvent.click(screen.getByRole('button', { name: '+ Panel' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Draw surface array' }))
+    fireEvent.click(screen.getByRole('tab', { name: 'Inspector' }))
+
+    await waitFor(() => {
+      expect(screen.getByTestId('settings-scope')).toHaveTextContent('Editing Group group-1')
+    })
+    const tilt = screen.getByLabelText('Panel tilt in degrees')
+    fireEvent.change(tilt, { target: { value: '25' } })
+    expect(screen.getByTestId('settings-scope')).toHaveTextContent('Editing Group group-1')
+    expect(tilt).toHaveValue(25)
+    const modulesPerRow = screen.getByRole('spinbutton', { name: 'Modules per row' })
+    const rowOffset = screen.getByRole('spinbutton', { name: 'Row offset in metres' })
+    const obstacleClearance = screen.getByRole('spinbutton', { name: 'Obstacle clearance in metres' })
+    fireEvent.change(modulesPerRow, { target: { value: '6' } })
+    fireEvent.change(rowOffset, { target: { value: '0.35' } })
+    fireEvent.change(obstacleClearance, { target: { value: '0.2' } })
+    expect(modulesPerRow).toHaveValue(6)
+    expect(rowOffset).toHaveValue(0.35)
+    expect(obstacleClearance).toHaveValue(0.2)
   })
 
   it('keeps tiny pointer jitter as one manual placement and cancels array previews without history', async () => {
@@ -537,13 +702,8 @@ describe('App', () => {
     })
   })
 
-  it('applies inspector settings and keeps align behind an explicit confirmation dialog', async () => {
-    render(<App webglAvailable />)
-    fireEvent.click(screen.getByRole('button', { name: '+ Panel' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Select roof surface' }))
-    fireEvent.click(screen.getByRole('button', { name: '+ Panel' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Place second panel' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Select surface box' }))
+  it('applies inspector settings and keeps align behind an explicit confirmation dialog', () => {
+    render(<AlignInspectorHarness />)
     fireEvent.click(screen.getByRole('tab', { name: 'Inspector' }))
 
     const clearance = screen.getByLabelText('Panel clearance in metres')
@@ -552,26 +712,62 @@ describe('App', () => {
     fireEvent.change(tilt, { target: { value: '35' } })
     expect(clearance).toHaveValue(0.25)
     expect(tilt).toHaveValue(35)
-
-    const centersBeforeAlign = screen.getByTestId('mock-placement-centers').textContent
+    expect(screen.getByTestId('settings-scope')).toHaveTextContent('Editing Group array-1')
 
     fireEvent.click(screen.getByRole('button', { name: /^Align/ }))
-    expect(screen.getByRole('dialog', { name: /align/i })).toBeInTheDocument()
+    expect(screen.getByRole('dialog', { name: 'Confirm alignment' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Apply alignment' })).toBeEnabled()
     fireEvent.click(screen.getByRole('button', { name: 'Apply alignment' }))
-    await waitFor(() => {
-      expect(screen.queryByRole('dialog', { name: /align/i })).not.toBeInTheDocument()
-    })
-    expect(screen.getByTestId('mock-placement-centers').textContent).not.toBe(centersBeforeAlign)
+    expect(screen.queryByRole('dialog', { name: /alignment/i })).not.toBeInTheDocument()
 
-    const spacing = screen.getByLabelText('Panel spacing in metres')
-    fireEvent.change(spacing, { target: { value: '10' } })
     fireEvent.click(screen.getByRole('button', { name: /^Align/ }))
-    expect(screen.getByRole('dialog', { name: /align/i })).toBeInTheDocument()
+    expect(screen.getByRole('dialog', { name: 'Confirm alignment' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Apply alignment' })).toBeDisabled()
     fireEvent.click(screen.getByRole('button', { name: 'Back' }))
-    await waitFor(() => {
-      expect(screen.queryByRole('dialog', { name: /align/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('dialog', { name: /alignment/i })).not.toBeInTheDocument()
+  })
+
+  it('routes advanced inspector edits to one group and clears optional fields without coercion', () => {
+    render(<SettingsBridgeHarness />)
+    const inspectorTab = screen.getByRole('tab', { name: 'Inspector' })
+
+    const settingsOutput = screen.getByTestId('bridge-settings')
+    act(() => { fireEvent.click(inspectorTab) })
+    const scope = screen.getByTestId('settings-scope')
+    expect(scope).toHaveTextContent('Editing Group array-bridge')
+
+    const groupModules = screen.getByRole('spinbutton', { name: 'Modules per row' })
+    expect(groupModules).toHaveValue(null)
+
+    act(() => { fireEvent.change(groupModules, { target: { value: '6' } }) })
+    expect(settingsOutput).toHaveTextContent('"modulesPerRow":6')
+
+    act(() => {
+      fireEvent.click(screen.getByRole('button', { name: 'Clear selected group' }))
     })
+    expect(scope).toHaveTextContent('Editing Global defaults')
+    const globalModules = screen.getByRole('spinbutton', { name: 'Modules per row' })
+    expect(globalModules).toHaveValue(null)
+    expect(settingsOutput).not.toHaveTextContent('modulesPerRow')
+    act(() => { fireEvent.change(globalModules, { target: { value: '7' } }) })
+    expect(settingsOutput).toHaveTextContent('"modulesPerRow":7')
+
+    act(() => {
+      fireEvent.click(screen.getByRole('button', { name: 'Select bridge group' }))
+    })
+    expect(scope).toHaveTextContent('Editing Group array-bridge')
+    expect(screen.getByRole('spinbutton', { name: 'Modules per row' })).toHaveValue(6)
+
+    act(() => {
+      fireEvent.change(screen.getByRole('spinbutton', { name: 'Modules per row' }), { target: { value: '' } })
+    })
+    expect(screen.getByRole('spinbutton', { name: 'Modules per row' })).toHaveValue(null)
+    expect(settingsOutput).not.toHaveTextContent('modulesPerRow')
+    act(() => {
+      fireEvent.click(screen.getByRole('button', { name: 'Clear selected group' }))
+    })
+    expect(scope).toHaveTextContent('Editing Global defaults')
+    expect(screen.getByRole('spinbutton', { name: 'Modules per row' })).toHaveValue(7)
   })
 
   it('selects multiple placements with a local surface box', async () => {
@@ -584,6 +780,25 @@ describe('App', () => {
     fireEvent.click(screen.getByRole('tab', { name: 'Inspector' }))
     await waitFor(() => {
       expect(screen.getByText(/selected/)).toHaveTextContent(/2 selected/)
+    })
+  })
+
+  it('holds the surface-box camera lock until pointerup or pointercancel', async () => {
+    render(<App webglAvailable />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Start selection box gesture' }))
+    expect(screen.getByTestId('mock-surface-gesture')).toHaveTextContent('active')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Finish selection box gesture' }))
+    await waitFor(() => {
+      expect(screen.getByTestId('mock-surface-gesture')).toHaveTextContent('idle')
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Start selection box gesture' }))
+    expect(screen.getByTestId('mock-surface-gesture')).toHaveTextContent('active')
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel selection box gesture' }))
+    await waitFor(() => {
+      expect(screen.getByTestId('mock-surface-gesture')).toHaveTextContent('idle')
     })
   })
 

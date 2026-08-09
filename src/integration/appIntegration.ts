@@ -18,6 +18,25 @@ export const CATALOG_PANEL_DEFINITIONS: readonly PanelDefinition[] = Object.free
   PANEL_CATALOG.map((panel) => toPanelDefinition(panel)),
 )
 
+const surfaceDirection = (azimuthDeg: number): string | undefined => {
+  if (!Number.isFinite(azimuthDeg)) return undefined
+  const normalized = ((azimuthDeg % 360) + 360) % 360
+  const directions = ['North', 'North-east', 'East', 'South-east', 'South', 'South-west', 'West', 'North-west'] as const
+  const index = Math.round(normalized / 45) % directions.length
+  return directions[index]
+}
+
+/**
+ * Surface ids are renderer UUIDs and are useful only for internal joins. Keep
+ * them out of the shell copy by deriving a stable label from the geometric
+ * metadata that the viewer already exposes.
+ */
+export function formatSurfaceLabel(surface: Pick<SurfaceDescriptor, 'tiltDeg' | 'azimuthDeg'>): string {
+  const kind = surface.tiltDeg <= 5 ? 'Ground plane' : surface.tiltDeg >= 80 ? 'Wall' : 'Roof face'
+  const direction = kind === 'Ground plane' ? undefined : surfaceDirection(surface.azimuthDeg)
+  return direction === undefined ? kind : `${kind} · ${direction}`
+}
+
 const frameColour = (panel: PanelSpec): number => panel.frameColor === 'black' ? 0x1e252b : 0x4f5f68
 
 /**
@@ -42,7 +61,7 @@ export function toShellSurface(surface: SurfaceDescriptor): ShellSurface {
     usableArea: surface.usableArea,
     azimuthDeg: surface.azimuthDeg,
     tiltDeg: surface.tiltDeg,
-    label: surface.id,
+    label: formatSurfaceLabel(surface),
   }
 }
 

@@ -1,6 +1,6 @@
 import * as THREE from 'three'
 import type { Point3 } from '../core'
-import type { ViewerBoundingBox, ViewerModelMetadata } from './types'
+import type { ViewerBoundingBox, ViewerModelMetadata, ViewerSourceMetadata } from './types'
 
 interface MeshMaterial extends THREE.Material {
   readonly map?: THREE.Texture | null
@@ -15,6 +15,8 @@ export interface ViewerMetadataOptions {
   readonly signal?: AbortSignal
   /** Vertices processed between macrotask yields. */
   readonly chunkSize?: number
+  /** Parser-owned source measurements for imported OBJ models. */
+  readonly source?: ViewerSourceMetadata
 }
 
 function isViewerMesh(child: THREE.Object3D): child is ViewerMesh {
@@ -38,8 +40,30 @@ function pointDto(point: THREE.Vector3): Point3 {
   return { x: point.x, y: point.y, z: point.z }
 }
 
+function sourceMetadataFields(source: ViewerSourceMetadata | undefined): {
+  readonly sourceVertexCount?: number
+  readonly sourcePolygonCount?: number
+  readonly sourceBounds?: ViewerBoundingBox
+} {
+  if (source === undefined) return {}
+  return {
+    sourceVertexCount: source.vertexCount,
+    sourcePolygonCount: source.polygonCount,
+    sourceBounds: source.bounds,
+  }
+}
+
+function sameWorldMatrix(first: THREE.Object3D, second: THREE.Object3D): boolean {
+  const firstElements = first.matrixWorld.elements
+  const secondElements = second.matrixWorld.elements
+  for (let index = 0; index < 16; index += 1) {
+    if (firstElements[index] !== secondElements[index]) return false
+  }
+  return true
+}
+
 /** Collects counts and world-space extents for an OBJ or demo scene. */
-export function computeViewerMetadata(object: THREE.Object3D, name = 'Site model', isDemo = false): ViewerModelMetadata {
+export function computeViewerMetadata(object: THREE.Object3D, name = 'Site model', isDemo = false, source?: ViewerSourceMetadata): ViewerModelMetadata {
   object.updateMatrixWorld(true)
 
   let vertexCount = 0
@@ -79,6 +103,7 @@ export function computeViewerMetadata(object: THREE.Object3D, name = 'Site model
     name,
     vertexCount,
     polygonCount,
+    ...sourceMetadataFields(source),
     meshCount,
     materialCount: materials.size,
     textureCount: textures.size,
@@ -125,6 +150,42 @@ export async function computeViewerMetadataAsync(
   let maxX = Number.NEGATIVE_INFINITY
   let maxY = Number.NEGATIVE_INFINITY
   let maxZ = Number.NEGATIVE_INFINITY
+  const source = options.source
+  const canUseSourceBounds = source !== undefined
+    && meshes.length > 0
+    && meshes.every((mesh) => sameWorldMatrix(mesh, object))
+  let sourceBoundsIncluded = false
+  const includeWorld = (x: number, y: number, z: number): void => {
+    const elements = object.matrixWorld.elements
+    const divisor = elements[3] * x + elements[7] * y + elements[11] * z + elements[15]
+    const inverseDivisor = divisor === 0 ? 1 : 1 / divisor
+    const worldX = (elements[0] * x + elements[4] * y + elements[8] * z + elements[12]) * inverseDivisor
+    const worldY = (elements[1] * x + elements[5] * y + elements[9] * z + elements[13]) * inverseDivisor
+    const worldZ = (elements[2] * x + elements[6] * y + elements[10] * z + elements[14]) * inverseDivisor
+    minX = Math.min(minX, worldX)
+    minY = Math.min(minY, worldY)
+    minZ = Math.min(minZ, worldZ)
+    maxX = Math.max(maxX, worldX)
+    maxY = Math.max(maxY, worldY)
+    maxZ = Math.max(maxZ, worldZ)
+  }
+  if (canUseSourceBounds) {
+    // `bounds` covers every source `v`, including unused outliers. The
+    // rendered/referenced bounds are authoritative for the camera and model
+    // box, while the full source bounds remain available as metadata.
+    const sourceBounds = source.renderedBounds ?? source.bounds
+    const sourceMin = sourceBounds.min
+    const sourceMax = sourceBounds.max
+    includeWorld(sourceMin.x, sourceMin.y, sourceMin.z)
+    includeWorld(sourceMin.x, sourceMin.y, sourceMax.z)
+    includeWorld(sourceMin.x, sourceMax.y, sourceMin.z)
+    includeWorld(sourceMin.x, sourceMax.y, sourceMax.z)
+    includeWorld(sourceMax.x, sourceMin.y, sourceMin.z)
+    includeWorld(sourceMax.x, sourceMin.y, sourceMax.z)
+    includeWorld(sourceMax.x, sourceMax.y, sourceMin.z)
+    includeWorld(sourceMax.x, sourceMax.y, sourceMax.z)
+    sourceBoundsIncluded = true
+  }
   for (const mesh of meshes) {
     meshCount += 1
     const geometry = mesh.geometry
@@ -135,6 +196,7 @@ export async function computeViewerMetadataAsync(
       materials.add(material)
       if (isMeshMaterial(material) && material.map !== undefined && material.map !== null) textures.add(material.map)
     }
+    if (sourceBoundsIncluded) continue
     // Scan each local position once, then transform only the eight corners of
     // its axis-aligned local box. The previous implementation multiplied every
     // vertex by matrixWorld, which made a 1.5M-vertex imported OBJ spend
@@ -164,7 +226,7 @@ export async function computeViewerMetadataAsync(
     }
     if (!Number.isFinite(localMinX) || !Number.isFinite(localMaxX)) continue
     const elements = mesh.matrixWorld.elements
-    const includeWorld = (x: number, y: number, z: number): void => {
+    const includeMeshWorld = (x: number, y: number, z: number): void => {
       const divisor = elements[3] * x + elements[7] * y + elements[11] * z + elements[15]
       const inverseDivisor = divisor === 0 ? 1 : 1 / divisor
       const worldX = (elements[0] * x + elements[4] * y + elements[8] * z + elements[12]) * inverseDivisor
@@ -177,14 +239,14 @@ export async function computeViewerMetadataAsync(
       maxY = Math.max(maxY, worldY)
       maxZ = Math.max(maxZ, worldZ)
     }
-    includeWorld(localMinX, localMinY, localMinZ)
-    includeWorld(localMinX, localMinY, localMaxZ)
-    includeWorld(localMinX, localMaxY, localMinZ)
-    includeWorld(localMinX, localMaxY, localMaxZ)
-    includeWorld(localMaxX, localMinY, localMinZ)
-    includeWorld(localMaxX, localMinY, localMaxZ)
-    includeWorld(localMaxX, localMaxY, localMinZ)
-    includeWorld(localMaxX, localMaxY, localMaxZ)
+    includeMeshWorld(localMinX, localMinY, localMinZ)
+    includeMeshWorld(localMinX, localMinY, localMaxZ)
+    includeMeshWorld(localMinX, localMaxY, localMinZ)
+    includeMeshWorld(localMinX, localMaxY, localMaxZ)
+    includeMeshWorld(localMaxX, localMinY, localMinZ)
+    includeMeshWorld(localMaxX, localMinY, localMaxZ)
+    includeMeshWorld(localMaxX, localMaxY, localMinZ)
+    includeMeshWorld(localMaxX, localMaxY, localMaxZ)
   }
   abortMetadata(options.signal)
   const boundingBox = Number.isFinite(minX) && Number.isFinite(maxX)
@@ -198,6 +260,7 @@ export async function computeViewerMetadataAsync(
     name,
     vertexCount,
     polygonCount,
+    ...sourceMetadataFields(options.source),
     meshCount,
     materialCount: materials.size,
     textureCount: textures.size,

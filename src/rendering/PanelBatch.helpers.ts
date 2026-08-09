@@ -14,6 +14,55 @@ import type { PanelInteractionHandler, PanelPointerInfo } from './types'
 export const PANEL_VISUAL_STATE_ORDER: readonly PanelVisualState[] = ['placed', 'selected', 'ghost']
 
 /**
+ * Compact location for one item in a visual-state instanced mesh.  The
+ * `instanceIndex` is the index used by panel/frame/outline meshes; cell-bar
+ * meshes derive their own bar index from this same compact slot.
+ */
+export interface CompactPanelInstance {
+  readonly state: PanelVisualState
+  readonly stateIndex: number
+  readonly instanceIndex: number
+  readonly item: PanelRenderItem
+}
+
+export interface CompactPanelItems {
+  readonly stateItems: readonly (readonly PanelRenderItem[])[]
+  readonly instancesById: ReadonlyMap<string, CompactPanelInstance>
+  readonly itemsById: ReadonlyMap<string, PanelRenderItem>
+}
+
+/**
+ * Build the compact state arrays and a direct id lookup in one pass.  The
+ * state arrays retain canonical item order, while the map lets pointer
+ * streams resolve a placement without scanning an entire geometry batch.
+ */
+export function createCompactPanelItems(items: readonly PanelRenderItem[]): CompactPanelItems {
+  const stateItems: PanelRenderItem[][] = PANEL_VISUAL_STATE_ORDER.map(() => [])
+  const instancesById = new Map<string, CompactPanelInstance>()
+  const itemsById = new Map<string, PanelRenderItem>()
+  for (const item of items) {
+    const stateIndex = PANEL_VISUAL_STATE_ORDER.indexOf(item.state)
+    const compactItems = stateItems[stateIndex]
+    if (stateIndex < 0 || compactItems === undefined) continue
+    const instanceIndex = compactItems.length
+    compactItems.push(item)
+    // Canonical render items are id-unique. If a defensive caller supplies a
+    // duplicate, retain it in the compact arrays for backwards-compatible
+    // rendering while keeping the first direct lookup deterministic.
+    if (!instancesById.has(item.id)) {
+      instancesById.set(item.id, {
+        state: item.state,
+        stateIndex,
+        instanceIndex,
+        item,
+      })
+      itemsById.set(item.id, item)
+    }
+  }
+  return { stateItems, instancesById, itemsById }
+}
+
+/**
  * Compact each visual state to the items that actually use that material.
  * Relative order is inherited from the canonical batch, making each compact
  * `instanceId` mapping deterministic across every mesh and cell-bar mesh in
@@ -22,7 +71,68 @@ export const PANEL_VISUAL_STATE_ORDER: readonly PanelVisualState[] = ['placed', 
 export function compactPanelItemsByState(
   items: readonly PanelRenderItem[],
 ): readonly (readonly PanelRenderItem[])[] {
-  return PANEL_VISUAL_STATE_ORDER.map((state) => items.filter((item) => item.state === state))
+  return createCompactPanelItems(items).stateItems
+}
+
+/** Stable id-to-compact-instance lookup for event and drag paths. */
+export function createCompactInstanceLookup(
+  items: readonly PanelRenderItem[],
+): ReadonlyMap<string, CompactPanelInstance> {
+  return createCompactPanelItems(items).instancesById
+}
+
+export const panelIdToCompactInstance = createCompactInstanceLookup
+
+/** Conservatively grow an aggregate sphere to include one changed instance. */
+export function expandSphereBySphere(target: THREE.Sphere, source: THREE.Sphere): void {
+  const delta = source.center.clone().sub(target.center)
+  const distance = delta.length()
+  if (distance + source.radius <= target.radius) return
+  if (distance + target.radius <= source.radius) {
+    target.copy(source)
+    return
+  }
+  if (distance <= Number.EPSILON) {
+    target.radius = Math.max(target.radius, source.radius)
+    return
+  }
+  const radius = (target.radius + distance + source.radius) / 2
+  target.center.addScaledVector(delta, (radius - target.radius) / distance)
+  target.radius = radius
+}
+
+/**
+ * Compare only matrix-affecting fields.  Placement/render item records are
+ * immutable and commonly rebuilt for every store snapshot, so object identity
+ * is not a useful change signal here.
+ */
+export function panelRenderItemsHaveSameMatrix(
+  previous: PanelRenderItem | undefined,
+  next: PanelRenderItem | undefined,
+): boolean {
+  if (previous === undefined || next === undefined || previous.id !== next.id) return false
+  const previousMatrix = previous.pose.matrix
+  const nextMatrix = next.pose.matrix
+  for (let index = 0; index < previousMatrix.length; index += 1) {
+    if (previousMatrix[index] !== nextMatrix[index]) return false
+  }
+  return true
+}
+
+/**
+ * Return compact slots whose matrix must be rewritten.  Unchanged slots are
+ * intentionally omitted so a one-item drag writes only that instance's
+ * matrices instead of walking the full batch in Three.js.
+ */
+export function changedPanelInstanceIndices(
+  previous: readonly PanelRenderItem[],
+  next: readonly PanelRenderItem[],
+): readonly number[] {
+  const changed: number[] = []
+  for (let index = 0; index < next.length; index += 1) {
+    if (!panelRenderItemsHaveSameMatrix(previous[index], next[index])) changed.push(index)
+  }
+  return changed
 }
 
 export interface PanelPointerCaptureTarget {
@@ -33,19 +143,25 @@ export interface PanelPointerCaptureTarget {
 /**
  * Resolve the browser element that owns a native pointer stream.
  *
- * R3F's `ThreeEvent.target` is the intersected Object3D, not the DOM event
- * target.  Pointer capture is a browser API and must therefore be requested
- * on `nativeEvent.target` (normally the canvas).  Keeping this guard at the
- * rendering boundary prevents an Object3D cast from silently turning a drag
- * into a hover-only interaction once the pointer leaves the panel mesh.
+ * R3F supplies a synthetic `ThreeEvent.target` with its own capture methods;
+ * those methods update Fiber's captured-object map and then capture the DOM
+ * event target. A native target is retained as a fallback for test hosts and
+ * non-Fiber dispatchers. Keeping this guard at the rendering boundary
+ * prevents an Object3D cast from silently turning a drag into a hover-only
+ * interaction once the pointer leaves the panel mesh.
  */
-export function pointerCaptureTarget(value: EventTarget | null): PanelPointerCaptureTarget | null {
-  if (typeof value !== 'object' || value === null || !('setPointerCapture' in value) || typeof value.setPointerCapture !== 'function') return null
-  return value as PanelPointerCaptureTarget
+export function pointerCaptureTarget(value: unknown): PanelPointerCaptureTarget | null {
+  if (typeof value !== 'object' || value === null) return null
+  const candidate = value as {
+    readonly setPointerCapture?: unknown
+    readonly releasePointerCapture?: unknown
+  }
+  if (typeof candidate.setPointerCapture !== 'function' && typeof candidate.releasePointerCapture !== 'function') return null
+  return value
 }
 
 export interface ActivePanelDrag {
-  readonly index: number
+  index: number
   readonly id: string
   readonly pointerId: number
   readonly placement: PanelRenderItem['placement']
@@ -107,6 +223,7 @@ export function syncInstancedMeshCount(mesh: THREE.InstancedMesh | null, count: 
   if (mesh === null) return
   const nextCount = Math.max(0, Math.floor(count))
   const attribute = mesh.instanceMatrix
+  let resized = false
   if (attribute.count < nextCount) {
     const nextArray = new Float32Array(nextCount * attribute.itemSize)
     nextArray.set(attribute.array)
@@ -115,9 +232,10 @@ export function syncInstancedMeshCount(mesh: THREE.InstancedMesh | null, count: 
       attribute.itemSize,
       attribute.normalized,
     )
+    resized = true
   }
   mesh.count = nextCount
-  mesh.instanceMatrix.needsUpdate = true
+  if (resized) mesh.instanceMatrix.needsUpdate = true
 }
 
 /**
@@ -131,9 +249,12 @@ export function finishPanelDrag(
   onPanelDragEnd: PanelInteractionHandler | undefined,
   info: PanelPointerInfo,
   releasePointer: (active: ActivePanelDrag) => void,
+  itemsById?: ReadonlyMap<string, PanelRenderItem>,
 ): ActivePanelDrag | null {
   if (active === null) return null
-  const item = items.find((candidate) => candidate.id === active.id)
+  const item = itemsById === undefined
+    ? items.find((candidate) => candidate.id === active.id)
+    : itemsById.get(active.id)
   try {
     releasePointer(active)
   } catch {

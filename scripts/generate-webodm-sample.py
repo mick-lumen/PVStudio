@@ -39,14 +39,14 @@ OBJ_PATH = OUTPUT / "synthetic-webodm-house.obj"
 MTL_PATH = OUTPUT / "synthetic-webodm-house.mtl"
 TEXTURES = (OUTPUT / "ground-texture.jpg", OUTPUT / "roof-texture.jpg", OUTPUT / "wall-texture.jpg")
 
-EXPECTED_COUNTS = (184_791, 184_791, 7, 365_760)
+EXPECTED_COUNTS = (545_871, 545_871, 7, 1_086_560)
 REQUIRED_MATERIAL_TEXTURES = {
     "Ground": "ground-texture.jpg",
     "Roof": "roof-texture.jpg",
     "Wall": "wall-texture.jpg",
 }
 EXPECTED_GROUP_FACES = {
-    "Ground": 259_200,
+    "Ground": 980_000,
     "RoofNorth": 36_000,
     "RoofSouth": 36_000,
     "WallEast": 8_640,
@@ -68,7 +68,7 @@ EXPECTED_GROUP_MATERIALS = {
 # Integrity checks are deliberately independent of Pillow/ffmpeg so a JPEG with
 # a plausible marker stream but corrupted entropy bytes cannot pass validation.
 EXPECTED_ARTIFACT_SHA256 = {
-    "synthetic-webodm-house.obj": "2d8c19e61eb3a5c3f2cf9c5c9617b587a9b2c1081caa2c9b1f8ec07035c2ccf7",
+    "synthetic-webodm-house.obj": "3934211d4e983dd855c6458e99dbaf3f7b2283510de1b469117598f050cfd196",
     "synthetic-webodm-house.mtl": "767005ac4294e70aee9e32306280d0d1c5fc11d09af46d6f22798ab017fddf5b",
     "ground-texture.jpg": "7ab85a4c63794f3e2bfb1aa3c4552a90b788eb2a241ee6f9829b5cf0073eb96f",
     "roof-texture.jpg": "59e76a17281ffe0b274ade53b343c3012b77434317d9d3e044bfc6e212d8764b",
@@ -132,13 +132,14 @@ def grid_surface(
 def build_surfaces() -> tuple[Surface, ...]:
     """Build the pitched-roof house, four walls, and textured ground."""
 
-    # 360 x 360 cells gives 259,200 ground triangles. Combined with roofs and
-    # walls this is well over 100,000 polygons while still opening quickly in
-    # a modern browser. The stable seed is intentionally explicit for repeatable
-    # validation and review.
+    # 700 x 700 cells gives 980,000 ground triangles. Combined with roofs and
+    # walls this clears the current 500,000-polygon large-model acceptance
+    # target while keeping the OBJ comfortably below GitHub's 100 MiB limit.
+    # The stable seed is intentionally explicit for repeatable validation and
+    # review.
     random.seed(20260809)
-    ground_width = 360
-    ground_height = 360
+    ground_width = 700
+    ground_height = 700
     ground = grid_surface(
         "Ground",
         "Ground",
@@ -662,8 +663,8 @@ def validate(root: Path = OUTPUT) -> tuple[int, int, int, int]:
     if not obj_path.is_file() or not mtl_path.is_file():
         raise FileNotFoundError("OBJ/MTL fixture is missing; run the generator first")
     obj_bytes = obj_path.stat().st_size
-    if obj_bytes < 10 * 1024 * 1024:
-        raise ValueError(f"OBJ is {obj_bytes} bytes; expected at least 10 MiB")
+    if obj_bytes < 50_000_000:
+        raise ValueError(f"OBJ is {obj_bytes} bytes; expected at least 50,000,000 bytes")
 
     materials = parse_mtl(mtl_path)
     for required_material, expected_texture in REQUIRED_MATERIAL_TEXTURES.items():
@@ -755,8 +756,8 @@ def validate(root: Path = OUTPUT) -> tuple[int, int, int, int]:
     counts = (len(positions) - 1, len(texcoords) - 1, len(normals) - 1, sum(group.faces for group in groups.values()))
     if counts != EXPECTED_COUNTS:
         raise ValueError(f"Fixture counts changed unexpectedly: got {counts}, expected {EXPECTED_COUNTS}")
-    if counts[3] < 100_000:
-        raise ValueError(f"OBJ has {counts[3]} triangles; expected at least 100,000")
+    if counts[3] < 500_000:
+        raise ValueError(f"OBJ has {counts[3]} triangles; expected at least 500,000")
     if set(materials) < {"Ground", "Roof", "Wall"}:
         raise ValueError("MTL does not contain Ground, Roof, and Wall material blocks")
     for group in groups.values():

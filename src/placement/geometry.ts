@@ -10,6 +10,7 @@ import type {
   SurfaceFrame,
   SurfaceNormal,
   SurfaceDescriptor,
+  SurfaceEdgeMetadata,
 } from '../core'
 import {
   isPoint2,
@@ -23,6 +24,7 @@ import {
   isSurfaceFrame,
   pointFromSurfaceCoordinates,
   projectPointToSurface,
+  SURFACE_EDGE_DIRECTION_EPSILON,
 } from '../core'
 
 /**
@@ -318,6 +320,129 @@ export function rectangleInsideSurfaceRegion(rectangle: unknown, region: unknown
     : isRect(region) && rectangleInsideRegion(rectangle, region, setbackM)
 }
 
+/** Local axes used by placement rows and panel poses.
+ *
+ * `rowAxis`/`crossAxis` are the sign-invariant physical basis used by panel
+ * poses and collision checks.  They are always right-handed in local 2D
+ * space. `traversalSign` carries the authored edge direction separately so
+ * auto-fill can enumerate rows in that direction without making a
+ * left-handed panel basis. Omitting edge metadata intentionally returns the
+ * canonical frame used by legacy payloads.
+ */
+export interface SurfaceEdgeAxes {
+  readonly rowAxis: Point2
+  readonly crossAxis: Point2
+  readonly traversalSign: 1 | -1
+}
+
+const canonicalZero = (value: number): number => (value === 0 ? 0 : value)
+
+const negatePoint2 = (point: Point2): Point2 => ({
+  x: canonicalZero(-point.x),
+  y: canonicalZero(-point.y),
+})
+
+const normalisePoint2 = (point: Point2): Point2 => {
+  const magnitude = Math.hypot(point.x, point.y)
+  return magnitude > SURFACE_EDGE_DIRECTION_EPSILON
+    ? { x: canonicalZero(point.x / magnitude), y: canonicalZero(point.y / magnitude) }
+    : { x: 1, y: 0 }
+}
+
+const orientAxisToReference = (axis: Point2, reference: Point2): Point2 => {
+  const canonicalAxis = { x: canonicalZero(axis.x), y: canonicalZero(axis.y) }
+  const alignment = canonicalAxis.x * reference.x + canonicalAxis.y * reference.y
+  if (alignment < -SURFACE_EDGE_DIRECTION_EPSILON) return negatePoint2(canonicalAxis)
+  if (Math.abs(alignment) <= SURFACE_EDGE_DIRECTION_EPSILON) {
+    // A line parallel to canonical downhill has no unique left/right side.
+    // Pick a sign from the axis itself, which is invariant under edge reversal
+    // because the tie-break is based on absolute direction, not row order.
+    if (canonicalAxis.x < -SURFACE_EDGE_DIRECTION_EPSILON
+      || (Math.abs(canonicalAxis.x) <= SURFACE_EDGE_DIRECTION_EPSILON && canonicalAxis.y < 0)) return negatePoint2(canonicalAxis)
+  }
+  return canonicalAxis
+}
+
+/** Choose one deterministic representative for an unoriented line axis. */
+const canonicalUnorientedAxis = (axis: Point2): Point2 => {
+  const normalised = normalisePoint2(axis)
+  return normalised.x < -SURFACE_EDGE_DIRECTION_EPSILON
+    || (Math.abs(normalised.x) <= SURFACE_EDGE_DIRECTION_EPSILON && normalised.y < 0)
+    ? negatePoint2(normalised)
+    : normalised
+}
+
+const axisDeterminant = (rowAxis: Point2, crossAxis: Point2): number =>
+  rowAxis.x * crossAxis.y - rowAxis.y * crossAxis.x
+
+const surfaceRegionPoints = (region: SurfaceDescriptor['region']): readonly Point2[] => {
+  if (isRect(region)) return [
+    { x: region.x, y: region.y },
+    { x: region.x + region.width, y: region.y },
+    { x: region.x + region.width, y: region.y + region.height },
+    { x: region.x, y: region.y + region.height },
+  ]
+  return isPolygon(region) ? region.points : []
+}
+
+/**
+ * Infer which side of an authored edge line contains the surface. Averaging
+ * signed distances is stable for concave regions and does not require a
+ * centroid that itself lies inside the polygon.
+ */
+const surfaceInteriorSide = (
+  line: NonNullable<SurfaceEdgeMetadata['line']>,
+  region: SurfaceDescriptor['region'],
+): Point2 | undefined => {
+  const points = surfaceRegionPoints(region)
+  if (points.length === 0) return undefined
+  const direction = normalisePoint2(line.direction)
+  const left = { x: -direction.y, y: direction.x }
+  const signedDistanceSum = points.reduce((sum, point) => sum
+    + (point.x - line.origin.x) * left.x
+    + (point.y - line.origin.y) * left.y, 0)
+  if (Math.abs(signedDistanceSum) <= SURFACE_EDGE_DIRECTION_EPSILON) return undefined
+  return signedDistanceSum > 0 ? left : negatePoint2(left)
+}
+
+export function deriveSurfaceEdgeAxes(
+  edge: SurfaceEdgeMetadata | undefined,
+  region?: SurfaceDescriptor['region'],
+): SurfaceEdgeAxes {
+  if (edge === undefined || !isFinitePoint(edge.direction) || Math.hypot(edge.direction.x, edge.direction.y) <= SURFACE_EDGE_DIRECTION_EPSILON) {
+    return { rowAxis: { x: 1, y: 0 }, crossAxis: { x: 0, y: 1 }, traversalSign: 1 }
+  }
+  const authoredDirection = normalisePoint2(edge.direction)
+  let rowAxis = canonicalUnorientedAxis(authoredDirection)
+  let crossAxis: Point2 = orientAxisToReference({ x: -rowAxis.y, y: rowAxis.x }, { x: 0, y: 1 })
+  // An authored line can identify the roof-facing side. Its direction is
+  // deliberately independent of the selected row direction, so reversing
+  // the row never changes the downhill/cross physical side.
+  if (edge.line !== undefined) {
+    const lineDirection = normalisePoint2(edge.line.direction)
+    const lineLeft = { x: -lineDirection.y, y: lineDirection.x }
+    const interiorSide = edge.side === undefined
+      ? region === undefined ? undefined : surfaceInteriorSide(edge.line, region)
+      : edge.side === 'right' ? negatePoint2(lineLeft) : lineLeft
+    if (interiorSide !== undefined) {
+      // Low edges (gutters and valleys) face toward the authored line; high
+      // or perimeter edges face into the roof. Reversing the line or row does
+      // not change this physical side.
+      const facingReference = edge.type === 'gutter' || edge.type === 'valley'
+        ? negatePoint2(interiorSide)
+        : interiorSide
+      crossAxis = orientAxisToReference(crossAxis, facingReference)
+    }
+  }
+  // The edge metadata describes a physical line, not a second orientation
+  // basis. Keep the panel basis right-handed even when the authored side is
+  // opposite the canonical perpendicular: reversing the row then changes
+  // only traversalSign, never the physical cross/downhill direction.
+  if (axisDeterminant(rowAxis, crossAxis) < 0) rowAxis = negatePoint2(rowAxis)
+  const traversalSign: 1 | -1 = authoredDirection.x * rowAxis.x + authoredDirection.y * rowAxis.y >= 0 ? 1 : -1
+  return { rowAxis, crossAxis, traversalSign }
+}
+
 const obstacleRectangles = (obstacles: unknown): readonly Rect[] | undefined => {
   if (obstacles === undefined) return []
   if (!Array.isArray(obstacles)) return undefined
@@ -361,6 +486,9 @@ const validSettings = (request: AutoFillRequest): {
   readonly setbackM: number
   readonly clearanceM: number
   readonly tiltDeg: number
+  readonly modulesPerRow?: number
+  readonly rowOffsetM?: number
+  readonly obstacleClearanceM?: number
 } | undefined => {
   const settings = request.settings
   const orientation = typeof settings.orientation === 'string' ? settings.orientation : ''
@@ -370,6 +498,11 @@ const validSettings = (request: AutoFillRequest): {
   if (!Number.isFinite(settings.setbackM) || settings.setbackM < 0) return undefined
   if (!Number.isFinite(settings.clearanceM) || settings.clearanceM < 0) return undefined
   if (!Number.isFinite(settings.tiltDeg) || settings.tiltDeg < 0 || settings.tiltDeg > 90) return undefined
+  if (settings.modulesPerRow !== undefined
+    && (!Number.isFinite(settings.modulesPerRow) || !Number.isInteger(settings.modulesPerRow) || settings.modulesPerRow <= 0)) return undefined
+  if (settings.rowOffsetM !== undefined && (!Number.isFinite(settings.rowOffsetM) || settings.rowOffsetM < 0)) return undefined
+  if (settings.obstacleClearanceM !== undefined
+    && (!Number.isFinite(settings.obstacleClearanceM) || settings.obstacleClearanceM < 0)) return undefined
   return {
     orientation,
     interPanelSpacingM: settings.interPanelSpacingM,
@@ -377,8 +510,140 @@ const validSettings = (request: AutoFillRequest): {
     setbackM: settings.setbackM,
     clearanceM: settings.clearanceM,
     tiltDeg: settings.tiltDeg,
+    ...(settings.modulesPerRow === undefined ? {} : { modulesPerRow: settings.modulesPerRow }),
+    ...(settings.rowOffsetM === undefined ? {} : { rowOffsetM: settings.rowOffsetM }),
+    ...(settings.obstacleClearanceM === undefined ? {} : { obstacleClearanceM: settings.obstacleClearanceM }),
   }
 }
+
+const regionPoints = (region: SurfaceDescriptor['region']): readonly Point2[] => {
+  if (isRect(region)) return rectangleCorners(region)
+  return isPolygon(region) ? region.points : []
+}
+
+const projectToAxis = (point: Point2, axis: Point2): number => point.x * axis.x + point.y * axis.y
+
+const projectedRegionBounds = (
+  region: SurfaceDescriptor['region'],
+  axes: SurfaceEdgeAxes,
+): { readonly rowMin: number; readonly rowMax: number; readonly crossMin: number; readonly crossMax: number } | undefined => {
+  const points = regionPoints(region)
+  if (points.length === 0) return undefined
+  const rowValues = points.map((point) => projectToAxis(point, axes.rowAxis))
+  const crossValues = points.map((point) => projectToAxis(point, axes.crossAxis))
+  const rowMin = Math.min(...rowValues)
+  const rowMax = Math.max(...rowValues)
+  const crossMin = Math.min(...crossValues)
+  const crossMax = Math.max(...crossValues)
+  return Number.isFinite(rowMin) && Number.isFinite(rowMax) && Number.isFinite(crossMin) && Number.isFinite(crossMax)
+    && rowMax - rowMin > GEOMETRY_EPSILON && crossMax - crossMin > GEOMETRY_EPSILON
+    ? { rowMin, rowMax, crossMin, crossMax }
+    : undefined
+}
+
+const pointFromAxes = (row: number, crossValue: number, axes: SurfaceEdgeAxes): Point2 => ({
+  x: axes.rowAxis.x * row + axes.crossAxis.x * crossValue,
+  y: axes.rowAxis.y * row + axes.crossAxis.y * crossValue,
+})
+
+export const orientedFootprintCorners = (centre: Point2, widthM: number, heightM: number, axes: SurfaceEdgeAxes): readonly Point2[] => {
+  const rowOffset = { x: axes.rowAxis.x * widthM / 2, y: axes.rowAxis.y * widthM / 2 }
+  const crossOffset = { x: axes.crossAxis.x * heightM / 2, y: axes.crossAxis.y * heightM / 2 }
+  return [
+    { x: centre.x - rowOffset.x - crossOffset.x, y: centre.y - rowOffset.y - crossOffset.y },
+    { x: centre.x + rowOffset.x - crossOffset.x, y: centre.y + rowOffset.y - crossOffset.y },
+    { x: centre.x + rowOffset.x + crossOffset.x, y: centre.y + rowOffset.y + crossOffset.y },
+    { x: centre.x - rowOffset.x + crossOffset.x, y: centre.y - rowOffset.y + crossOffset.y },
+  ]
+}
+
+const orientedCorners = orientedFootprintCorners
+
+const pointInsideSurfaceRegion = (point: Point2, region: SurfaceDescriptor['region'], setbackM: number): boolean => {
+  if (isRect(region)) {
+    return point.x >= region.x + setbackM - GEOMETRY_EPSILON
+      && point.y >= region.y + setbackM - GEOMETRY_EPSILON
+      && point.x <= region.x + region.width - setbackM + GEOMETRY_EPSILON
+      && point.y <= region.y + region.height - setbackM + GEOMETRY_EPSILON
+  }
+  if (!isPolygon(region)) return false
+  if (!pointInPolygon(point, region.points)) return false
+  if (setbackM <= GEOMETRY_EPSILON) return true
+  const minimumDistanceSquared = region.points.reduce((minimum, start, index) => {
+    const end = region.points[(index + 1) % region.points.length]
+    return end === undefined
+      ? minimum
+      : Math.min(minimum, pointToSegmentDistanceSquared(point, start, end))
+  }, Number.POSITIVE_INFINITY)
+  return minimumDistanceSquared >= setbackM * setbackM - GEOMETRY_EPSILON
+}
+
+export const orientedCandidateInsideRegion = (
+  centre: Point2,
+  widthM: number,
+  heightM: number,
+  region: SurfaceDescriptor['region'],
+  axes: SurfaceEdgeAxes,
+  setbackM: number,
+): boolean => {
+  const corners = orientedCorners(centre, widthM, heightM, axes)
+  if (!corners.every((corner) => pointInsideSurfaceRegion(corner, region, setbackM))) return false
+  if (!isPolygon(region)) return true
+  // `rectangleEdges` is axis-aligned, so use the oriented corners directly
+  // for edge-crossing and clearance checks against concave boundaries.
+  const orientedEdges: readonly [Point2, Point2][] = corners.map((start, index) => {
+    const end = corners[(index + 1) % corners.length] ?? start
+    return [start, end]
+  })
+  for (let index = 0; index < region.points.length; index += 1) {
+    const start = region.points[index]
+    const end = region.points[(index + 1) % region.points.length]
+    if (start === undefined || end === undefined) continue
+    for (const [edgeStart, edgeEnd] of orientedEdges) {
+      if (properSegmentsIntersect(start, end, edgeStart, edgeEnd)) return false
+      if (setbackM > GEOMETRY_EPSILON
+        && segmentDistanceSquared(start, end, edgeStart, edgeEnd) < setbackM * setbackM - GEOMETRY_EPSILON) return false
+    }
+  }
+  return true
+}
+
+export const polygonOverlap = (first: readonly Point2[], second: readonly Point2[]): boolean => {
+  const axes: Point2[] = []
+  const addAxes = (points: readonly Point2[]): void => {
+    for (let index = 0; index < points.length; index += 1) {
+      const start = points[index]
+      const end = points[(index + 1) % points.length]
+      if (start === undefined || end === undefined) continue
+      const edge = { x: end.x - start.x, y: end.y - start.y }
+      const length = Math.hypot(edge.x, edge.y)
+      if (length > GEOMETRY_EPSILON) axes.push({ x: -edge.y / length, y: edge.x / length })
+    }
+  }
+  addAxes(first)
+  addAxes(second)
+  return axes.every((axis) => {
+    const firstValues = first.map((point) => projectToAxis(point, axis))
+    const secondValues = second.map((point) => projectToAxis(point, axis))
+    return Math.max(...firstValues) >= Math.min(...secondValues) - GEOMETRY_EPSILON
+      && Math.max(...secondValues) >= Math.min(...firstValues) - GEOMETRY_EPSILON
+  })
+}
+
+export const orientedObstacleOverlap = (
+  centre: Point2,
+  widthM: number,
+  heightM: number,
+  obstacle: Rect,
+  axes: SurfaceEdgeAxes,
+): boolean => polygonOverlap(orientedCorners(centre, widthM, heightM, axes), rectangleCorners(obstacle))
+
+const expandObstacle = (obstacle: Rect, clearanceM: number): Rect => ({
+  x: obstacle.x - clearanceM,
+  y: obstacle.y - clearanceM,
+  width: obstacle.width + 2 * clearanceM,
+  height: obstacle.height + 2 * clearanceM,
+})
 
 /**
  * Deterministically lay panels on a local rectangular or polygonal region.
@@ -396,27 +661,57 @@ export function generateAutoFill(panel: Pick<PanelDefinition, 'widthM' | 'height
   const footprint = orientedFootprint(panel, settings.orientation)
   const obstacles = obstacleRectangles(request.obstacles)
   if (obstacles === undefined) return []
-  const stepX = footprint.widthM + settings.interPanelSpacingM
-  const stepY = footprint.heightM + settings.rowSpacingM
-  if (!Number.isFinite(stepX) || !Number.isFinite(stepY) || stepX <= GEOMETRY_EPSILON || stepY <= GEOMETRY_EPSILON) return []
-  const startX = bounds.x + settings.setbackM + footprint.widthM / 2
-  const startY = bounds.y + settings.setbackM + footprint.heightM / 2
-  const endX = bounds.x + bounds.width - settings.setbackM - footprint.widthM / 2
-  const endY = bounds.y + bounds.height - settings.setbackM - footprint.heightM / 2
-  if (startX > endX + GEOMETRY_EPSILON || startY > endY + GEOMETRY_EPSILON) return []
+  const edgeAxes = deriveSurfaceEdgeAxes(request.edge, request.region)
+  const hasEdge = request.edge !== undefined
+  const traversalAxes: SurfaceEdgeAxes = hasEdge && edgeAxes.traversalSign === -1
+    ? { ...edgeAxes, rowAxis: negatePoint2(edgeAxes.rowAxis) }
+    : edgeAxes
+  const projected = hasEdge ? projectedRegionBounds(request.region, traversalAxes) : undefined
+  const rowMin = projected?.rowMin ?? bounds.x
+  const rowMax = projected?.rowMax ?? bounds.x + bounds.width
+  const crossMin = projected?.crossMin ?? bounds.y
+  const crossMax = projected?.crossMax ?? bounds.y + bounds.height
+  const stepRow = footprint.widthM + settings.interPanelSpacingM
+  const stepCross = footprint.heightM + settings.rowSpacingM
+  if (!Number.isFinite(stepRow) || !Number.isFinite(stepCross) || stepRow <= GEOMETRY_EPSILON || stepCross <= GEOMETRY_EPSILON) return []
+  const startRow = rowMin + settings.setbackM + footprint.widthM / 2
+  const startCross = crossMin + settings.setbackM + footprint.heightM / 2
+  const endRow = rowMax - settings.setbackM - footprint.widthM / 2
+  const endCross = crossMax - settings.setbackM - footprint.heightM / 2
+  if (startRow > endRow + GEOMETRY_EPSILON || startCross > endCross + GEOMETRY_EPSILON) return []
   const candidates: AutoFillCandidate[] = []
   // Use integer row/column counts rather than accumulated floating point
   // increments; this prevents drift on large surfaces and gives deterministic
   // results across JS engines.
-  const columns = Math.max(0, Math.floor((endX - startX + GEOMETRY_EPSILON) / stepX) + 1)
-  const rows = Math.max(0, Math.floor((endY - startY + GEOMETRY_EPSILON) / stepY) + 1)
+  const availableColumns = Math.max(0, Math.floor((endRow - startRow + GEOMETRY_EPSILON) / stepRow) + 1)
+  const columns = settings.modulesPerRow === undefined
+    ? availableColumns
+    : Math.min(availableColumns, settings.modulesPerRow)
+  const rows = Math.max(0, Math.floor((endCross - startCross + GEOMETRY_EPSILON) / stepCross) + 1)
+  // A stagger is measured in physical metres along the generated row axis.
+  // Clamp it to the usable row span so an oversized request cannot push the
+  // first shifted module past the opposite edge. Candidates beyond the span
+  // are still filtered by the normal region test below (important for
+  // polygonal/concave regions), making clipping deterministic.
+  const maxRowOffset = Math.max(0, endRow - startRow)
+  const rowOffsetM = settings.rowOffsetM === undefined
+    ? 0
+    : Math.min(settings.rowOffsetM, maxRowOffset)
+  const obstacleClearanceM = settings.obstacleClearanceM ?? 0
+  const effectiveObstacles = obstacleClearanceM > GEOMETRY_EPSILON
+    ? obstacles.map((obstacle) => expandObstacle(obstacle, obstacleClearanceM))
+    : obstacles
   for (let row = 0; row < rows; row += 1) {
-    const centerY = startY + row * stepY
+    const centerCross = startCross + row * stepCross
+    const rowOffset = row % 2 === 1 ? rowOffsetM : 0
     for (let column = 0; column < columns; column += 1) {
-      const centerX = startX + column * stepX
+      const centerRow = startRow + rowOffset + column * stepRow
+      const localCenter = hasEdge
+        ? pointFromAxes(centerRow, centerCross, traversalAxes)
+        : { x: centerRow, y: centerCross }
       const candidate: AutoFillCandidate = {
         id: `candidate-${String(candidates.length + 1)}`,
-        localCenter: { x: centerX, y: centerY },
+        localCenter,
         footprint,
         orientation: settings.orientation,
         clearanceM: settings.clearanceM,
@@ -425,8 +720,13 @@ export function generateAutoFill(panel: Pick<PanelDefinition, 'widthM' | 'height
       }
       const rectangle = candidateBounds(candidate)
       if (rectangle === undefined) continue
-      if (!rectangleInsideSurfaceRegion(rectangle, request.region, settings.setbackM)) continue
-      if (obstacles.some((obstacle) => rectanglesOverlap(rectangle, obstacle))) continue
+      const fits = hasEdge
+        ? orientedCandidateInsideRegion(localCenter, footprint.widthM, footprint.heightM, request.region, edgeAxes, settings.setbackM)
+        : rectangleInsideSurfaceRegion(rectangle, request.region, settings.setbackM)
+      if (!fits) continue
+      if (hasEdge
+        ? effectiveObstacles.some((obstacle) => orientedObstacleOverlap(localCenter, footprint.widthM, footprint.heightM, obstacle, edgeAxes))
+        : effectiveObstacles.some((obstacle) => rectanglesOverlap(rectangle, obstacle))) continue
       candidates.push(candidate)
     }
   }

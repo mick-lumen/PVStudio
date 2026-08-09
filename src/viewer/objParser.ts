@@ -19,6 +19,29 @@ export interface ObjDocumentBounds {
   readonly max: { readonly x: number; readonly y: number; readonly z: number }
 }
 
+export type ObjTypedArray = Float32Array | Uint32Array | Int32Array
+
+/**
+ * Returns an ArrayBuffer containing only the visible bytes of a typed array.
+ * Worker transfer lists must never expose a growable builder's spare capacity
+ * (or an unrelated prefix/suffix when a subarray is passed).
+ */
+export function exactObjArrayBuffer(view: ObjTypedArray): ArrayBuffer {
+  if (view.byteOffset === 0 && view.byteLength === view.buffer.byteLength) return view.buffer as ArrayBuffer
+  return view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength) as ArrayBuffer
+}
+
+/** Counts collected from the OBJ source while it is parsed. */
+export interface ObjDocumentSourceCounts {
+  readonly vertexCount: number
+  readonly texcoordCount: number
+  readonly normalCount: number
+  /** Triangles emitted after fan-triangulating source faces. */
+  readonly polygonCount: number
+  /** Face corners emitted after fan-triangulating source faces. */
+  readonly cornerCount: number
+}
+
 export interface ParsedObjDocument {
   readonly positions: Float32Array
   readonly texcoords: Float32Array
@@ -26,6 +49,10 @@ export interface ParsedObjDocument {
   readonly groups: readonly ParsedObjGroup[]
   /** Bounds collected while reading `v` records; avoids a second vertex scan. */
   readonly bounds: ObjDocumentBounds
+  /** Bounds of positions referenced by triangulated faces. */
+  readonly referencedBounds?: ObjDocumentBounds
+  /** Authoritative source counts; unlike geometry attributes these do not count expanded tuples. */
+  readonly sourceCounts?: ObjDocumentSourceCounts
 }
 
 export interface ObjParserOptions {
@@ -61,6 +88,8 @@ interface ObjAccumulator {
   maxX: number
   maxY: number
   maxZ: number
+  polygonCount: number
+  cornerCount: number
 }
 
 /** Growable typed buffers keep large OBJ scans off the JS number[] heap. */
@@ -96,6 +125,11 @@ class Float32Builder {
   public view(): Float32Array {
     return this.buffer.subarray(0, this.length)
   }
+
+  /** Returns an owned array whose backing buffer is exactly length-sized. */
+  public toArray(): Float32Array {
+    return this.length === this.buffer.length ? this.buffer : this.buffer.slice(0, this.length)
+  }
 }
 
 class Uint32Builder {
@@ -122,6 +156,11 @@ class Uint32Builder {
 
   public view(): Uint32Array {
     return this.buffer.subarray(0, this.length)
+  }
+
+  /** Returns an owned array whose backing buffer is exactly length-sized. */
+  public toArray(): Uint32Array {
+    return this.length === this.buffer.length ? this.buffer : this.buffer.slice(0, this.length)
   }
 }
 
@@ -150,6 +189,11 @@ class Int32Builder {
   public view(): Int32Array {
     return this.buffer.subarray(0, this.length)
   }
+
+  /** Returns an owned array whose backing buffer is exactly length-sized. */
+  public toArray(): Int32Array {
+    return this.length === this.buffer.length ? this.buffer : this.buffer.slice(0, this.length)
+  }
 }
 
 function newAccumulator(): ObjAccumulator {
@@ -166,6 +210,8 @@ function newAccumulator(): ObjAccumulator {
     maxX: Number.NEGATIVE_INFINITY,
     maxY: Number.NEGATIVE_INFINITY,
     maxZ: Number.NEGATIVE_INFINITY,
+    polygonCount: 0,
+    cornerCount: 0,
   }
 }
 
@@ -317,6 +363,8 @@ function parseLine(line: string, accumulator: ObjAccumulator): void {
         group.indices.push3(firstPosition, secondPosition, parsedCorner.position)
         group.uvIndices.push3(firstUv, secondUv, parsedCorner.uv)
         group.normalIndices.push3(firstNormal, secondNormal, parsedCorner.normal)
+        accumulator.polygonCount += 1
+        accumulator.cornerCount += 3
         secondPosition = parsedCorner.position; secondUv = parsedCorner.uv; secondNormal = parsedCorner.normal
       }
       validCorners += 1
@@ -400,17 +448,40 @@ function derivePositionNormals(accumulator: ObjAccumulator): void {
 function finish(accumulator: ObjAccumulator, deriveNormals = false): ParsedObjDocument {
   if (deriveNormals) derivePositionNormals(accumulator)
   const hasBounds = Number.isFinite(accumulator.minX) && Number.isFinite(accumulator.maxX)
+  const groups = [...accumulator.groups.values()].filter((group) => group.indices.length > 0).map((group) => ({
+    name: group.name,
+    materialName: group.materialName,
+    indices: group.indices.toArray(),
+    uvIndices: group.uvIndices.toArray(),
+    normalIndices: group.generatedNormalIndices ?? group.normalIndices.toArray(),
+  }))
+  let referencedMinX = Number.POSITIVE_INFINITY
+  let referencedMinY = Number.POSITIVE_INFINITY
+  let referencedMinZ = Number.POSITIVE_INFINITY
+  let referencedMaxX = Number.NEGATIVE_INFINITY
+  let referencedMaxY = Number.NEGATIVE_INFINITY
+  let referencedMaxZ = Number.NEGATIVE_INFINITY
+  const sourcePositions = accumulator.positions.view()
+  for (const group of groups) {
+    for (const index of group.indices) {
+      const offset = index * 3
+      const x = sourcePositions[offset] ?? 0
+      const y = sourcePositions[offset + 1] ?? 0
+      const z = sourcePositions[offset + 2] ?? 0
+      referencedMinX = Math.min(referencedMinX, x)
+      referencedMinY = Math.min(referencedMinY, y)
+      referencedMinZ = Math.min(referencedMinZ, z)
+      referencedMaxX = Math.max(referencedMaxX, x)
+      referencedMaxY = Math.max(referencedMaxY, y)
+      referencedMaxZ = Math.max(referencedMaxZ, z)
+    }
+  }
+  const hasReferencedBounds = Number.isFinite(referencedMinX) && Number.isFinite(referencedMaxX)
   return {
-    positions: accumulator.positions.view(),
-    texcoords: accumulator.texcoords.view(),
-    normals: accumulator.generatedNormals ?? accumulator.normals.view(),
-    groups: [...accumulator.groups.values()].filter((group) => group.indices.length > 0).map((group) => ({
-      name: group.name,
-      materialName: group.materialName,
-      indices: group.indices.view(),
-      uvIndices: group.uvIndices.view(),
-      normalIndices: group.generatedNormalIndices ?? group.normalIndices.view(),
-    })),
+    positions: accumulator.positions.toArray(),
+    texcoords: accumulator.texcoords.toArray(),
+    normals: accumulator.generatedNormals ?? accumulator.normals.toArray(),
+    groups,
     bounds: {
       min: {
         x: hasBounds ? accumulator.minX : 0,
@@ -422,6 +493,25 @@ function finish(accumulator: ObjAccumulator, deriveNormals = false): ParsedObjDo
         y: hasBounds ? accumulator.maxY : 0,
         z: hasBounds ? accumulator.maxZ : 0,
       },
+    },
+    referencedBounds: {
+      min: {
+        x: hasReferencedBounds ? referencedMinX : 0,
+        y: hasReferencedBounds ? referencedMinY : 0,
+        z: hasReferencedBounds ? referencedMinZ : 0,
+      },
+      max: {
+        x: hasReferencedBounds ? referencedMaxX : 0,
+        y: hasReferencedBounds ? referencedMaxY : 0,
+        z: hasReferencedBounds ? referencedMaxZ : 0,
+      },
+    },
+    sourceCounts: {
+      vertexCount: accumulator.positions.length / 3,
+      texcoordCount: accumulator.texcoords.length / 2,
+      normalCount: accumulator.normals.length / 3,
+      polygonCount: accumulator.polygonCount,
+      cornerCount: accumulator.cornerCount,
     },
   }
 }

@@ -4,8 +4,10 @@ import type {
   PanelPlacement,
   Point3,
   SurfaceDescriptor,
+  SurfaceEdgeMetadata,
   SurfaceNormal,
 } from '../core'
+import { deriveSurfaceEdgeAxes } from '../placement/geometry'
 
 /** A small, allocation-friendly vector tuple used at the rendering boundary. */
 export type Vector3Tuple = readonly [number, number, number]
@@ -40,44 +42,48 @@ const FALLBACK_Z: Vector3Tuple = [0, 0, 1]
 
 const finite = (value: number): boolean => Number.isFinite(value)
 
+const canonicalZero = (value: number): number => (value === 0 ? 0 : value)
+
 const tuple = (value: SurfaceNormal | Point3): Vector3Tuple => [
-  finite(value.x) ? value.x : 0,
-  finite(value.y) ? value.y : 0,
-  finite(value.z) ? value.z : 0,
+  finite(value.x) ? canonicalZero(value.x) : 0,
+  finite(value.y) ? canonicalZero(value.y) : 0,
+  finite(value.z) ? canonicalZero(value.z) : 0,
 ]
 
 const length = (value: Vector3Tuple): number => Math.hypot(value[0], value[1], value[2])
 
 export const add = (first: Vector3Tuple, second: Vector3Tuple): Vector3Tuple => [
-  first[0] + second[0],
-  first[1] + second[1],
-  first[2] + second[2],
+  canonicalZero(first[0] + second[0]),
+  canonicalZero(first[1] + second[1]),
+  canonicalZero(first[2] + second[2]),
 ]
 
 export const subtract = (first: Vector3Tuple, second: Vector3Tuple): Vector3Tuple => [
-  first[0] - second[0],
-  first[1] - second[1],
-  first[2] - second[2],
+  canonicalZero(first[0] - second[0]),
+  canonicalZero(first[1] - second[1]),
+  canonicalZero(first[2] - second[2]),
 ]
 
 export const scale = (value: Vector3Tuple, amount: number): Vector3Tuple => [
-  value[0] * amount,
-  value[1] * amount,
-  value[2] * amount,
+  canonicalZero(value[0] * amount),
+  canonicalZero(value[1] * amount),
+  canonicalZero(value[2] * amount),
 ]
 
 export const dot = (first: Vector3Tuple, second: Vector3Tuple): number =>
   first[0] * second[0] + first[1] * second[1] + first[2] * second[2]
 
 export const cross = (first: Vector3Tuple, second: Vector3Tuple): Vector3Tuple => [
-  first[1] * second[2] - first[2] * second[1],
-  first[2] * second[0] - first[0] * second[2],
-  first[0] * second[1] - first[1] * second[0],
+  canonicalZero(first[1] * second[2] - first[2] * second[1]),
+  canonicalZero(first[2] * second[0] - first[0] * second[2]),
+  canonicalZero(first[0] * second[1] - first[1] * second[0]),
 ]
 
 export const normalise = (value: Vector3Tuple, fallback: Vector3Tuple = FALLBACK_Z): Vector3Tuple => {
   const magnitude = length(value)
-  return magnitude > EPSILON && finite(magnitude) ? scale(value, 1 / magnitude) : fallback
+  return magnitude > EPSILON && finite(magnitude)
+    ? scale(value, 1 / magnitude)
+    : [canonicalZero(fallback[0]), canonicalZero(fallback[1]), canonicalZero(fallback[2])]
 }
 
 const orthogonalTangent = (normal: Vector3Tuple): Vector3Tuple => {
@@ -91,26 +97,43 @@ const projectedUnit = (value: Vector3Tuple, normal: Vector3Tuple): Vector3Tuple 
   return magnitude > EPSILON && finite(magnitude) ? scale(projected, 1 / magnitude) : undefined
 }
 
-const frameAxes = (surface: SurfaceDescriptor): {
+const frameAxes = (surface: SurfaceDescriptor, edge?: SurfaceEdgeMetadata | null): {
   readonly normal: Vector3Tuple
   readonly tangentX: Vector3Tuple
   readonly tangentY: Vector3Tuple
+  /** Canonical local-coordinate basis used to locate the placement anchor. */
+  readonly anchorTangentX: Vector3Tuple
+  readonly anchorTangentY: Vector3Tuple
 } => {
   const normal = normalise(tuple(surface.frame.normal))
   const suppliedX = tuple(surface.frame.tangentX)
-  const tangentX = projectedUnit(suppliedX, normal) ?? orthogonalTangent(normal)
-  const derivedY = normalise(cross(normal, tangentX), orthogonalTangent(normal))
+  const canonicalTangentX = projectedUnit(suppliedX, normal) ?? orthogonalTangent(normal)
+  const derivedY = normalise(cross(normal, canonicalTangentX), orthogonalTangent(normal))
   // Preserve a valid supplied tangent-Y orientation while Gram–Schmidt
   // projecting it against both the normal and tangent-X. If it points the
   // wrong way, flip it so X × Y = normal and the returned basis is orthonormal.
   const suppliedY = projectedUnit(tuple(surface.frame.tangentY), normal)
   const tangentYCandidate = suppliedY === undefined
     ? derivedY
-    : normalise(subtract(suppliedY, scale(tangentX, dot(suppliedY, tangentX))), derivedY)
-  const tangentY = dot(cross(tangentX, tangentYCandidate), normal) >= 0
+    : normalise(subtract(suppliedY, scale(canonicalTangentX, dot(suppliedY, canonicalTangentX))), derivedY)
+  let tangentX = canonicalTangentX
+  let tangentY = dot(cross(canonicalTangentX, tangentYCandidate), normal) >= 0
     ? tangentYCandidate
     : scale(tangentYCandidate, -1)
-  return { normal, tangentX, tangentY }
+  const anchorTangentX = canonicalTangentX
+  const anchorTangentY = tangentY
+  // `null` is an explicit source override used when a user clears an edge
+  // annotation. `undefined` retains the embedded edge fallback for legacy
+  // surface descriptors.
+  const activeEdge = edge === null ? undefined : edge ?? surface.edge
+  if (activeEdge !== undefined) {
+    const localAxes = deriveSurfaceEdgeAxes(activeEdge, surface.region)
+    const edgeTangent = add(scale(canonicalTangentX, localAxes.rowAxis.x), scale(tangentY, localAxes.rowAxis.y))
+    tangentX = normalise(edgeTangent, canonicalTangentX)
+    const edgeCross = add(scale(canonicalTangentX, localAxes.crossAxis.x), scale(tangentY, localAxes.crossAxis.y))
+    tangentY = normalise(edgeCross, normalise(cross(normal, tangentX), tangentY))
+  }
+  return { normal, tangentX, tangentY, anchorTangentX, anchorTangentY }
 }
 
 const orientedFootprint = (panel: PanelDefinition, placement: PanelPlacement): PanelFootprint =>
@@ -126,8 +149,13 @@ const orientedFootprint = (panel: PanelDefinition, placement: PanelPlacement): P
  * clearance remains measured from the original surface normal. The returned
  * matrix is column-major and can be passed directly to `Matrix4.fromArray`.
  */
-export function computePanelPose(panel: PanelDefinition, surface: SurfaceDescriptor, placement: PanelPlacement): PanelPose {
-  const axes = frameAxes(surface)
+export function computePanelPose(
+  panel: PanelDefinition,
+  surface: SurfaceDescriptor,
+  placement: PanelPlacement,
+  edge?: SurfaceEdgeMetadata | null,
+): PanelPose {
+  const axes = frameAxes(surface, edge)
   const footprint = orientedFootprint(panel, placement)
   const clearanceM = finite(placement.clearanceM) && placement.clearanceM >= 0 ? placement.clearanceM : 0
   const tiltDeg = finite(placement.tiltDeg) ? Math.min(90, Math.max(0, placement.tiltDeg)) : 0
@@ -136,10 +164,13 @@ export function computePanelPose(panel: PanelDefinition, surface: SurfaceDescrip
     add(scale(axes.normal, Math.cos(tiltRadians)), scale(axes.tangentY, Math.sin(tiltRadians))),
     axes.normal,
   )
-  const tiltedTangentY = normalise(cross(tiltedNormal, axes.tangentX), axes.tangentY)
+  const rawTiltedTangentY = normalise(cross(tiltedNormal, axes.tangentX), axes.tangentY)
+  const tiltedTangentY = dot(rawTiltedTangentY, axes.tangentY) >= 0
+    ? rawTiltedTangentY
+    : scale(rawTiltedTangentY, -1)
   const anchorTuple = add(
-    add(tuple(surface.frame.origin), scale(axes.tangentX, placement.localCenter.x)),
-    add(scale(axes.tangentY, placement.localCenter.y), scale(axes.normal, clearanceM)),
+    add(tuple(surface.frame.origin), scale(axes.anchorTangentX, placement.localCenter.x)),
+    add(scale(axes.anchorTangentY, placement.localCenter.y), scale(axes.normal, clearanceM)),
   )
   const centerTuple = add(anchorTuple, scale(tiltedNormal, Math.max(0, panel.thicknessM) / 2))
   const center: Point3 = { x: centerTuple[0], y: centerTuple[1], z: centerTuple[2] }

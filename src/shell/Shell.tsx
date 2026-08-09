@@ -17,7 +17,6 @@ import {
   PanelsTopLeft,
   Plus,
   Redo2,
-  Rotate3d,
   Settings2,
   SlidersHorizontal,
   Sparkles,
@@ -46,11 +45,16 @@ import type {
   Point2,
   RectangularObstacle,
   SurfaceDescriptor,
+  SurfaceEdgeLine,
+  SurfaceEdgeMetadata,
+  SurfaceEdgeSide,
+  SurfaceEdgeType,
 } from '../core'
+import { isSurfaceEdgeMetadata } from '../core'
 import { supportsWebGL } from './webgl'
 
 export type Theme = 'light' | 'dark'
-export type ToolId = 'select' | 'place' | 'obstacle' | 'autofill' | 'align' | 'orbit' | 'measure'
+export type ToolId = 'select' | 'place' | 'obstacle' | 'autofill' | 'align'
 export type ViewMode = '3d' | '2d'
 export type RenderMode = 'texture' | 'wireframe'
 export type InspectorTab = 'panel' | 'inspector'
@@ -59,6 +63,14 @@ export type AlignStage = 'idle' | 'preview' | 'confirm'
 /** A display-ready surface summary. SurfaceDescriptor is structurally compatible. */
 export type ShellSurface = Pick<SurfaceDescriptor, 'id' | 'area' | 'usableArea' | 'azimuthDeg' | 'tiltDeg'> & {
   readonly label?: string
+}
+
+/** Display-ready edge metadata for the selected surface inspector. */
+export interface ShellSurfaceEdge extends SurfaceEdgeMetadata {
+  readonly surfaceId: string
+  readonly label: string
+  readonly path: string
+  readonly line?: SurfaceEdgeLine
 }
 
 /** The minimum panel data the shell may display. Panel catalogues stay in PanelChooser. */
@@ -113,11 +125,15 @@ export interface ShellProps {
   readonly initialActiveTool?: ToolId
   readonly onToolChange?: (tool: ToolId) => void
   readonly selectedSurface?: ShellSurface | null
+  readonly selectedSurfaceEdge?: ShellSurfaceEdge | null
+  readonly onSurfaceEdgeChange?: (edge: SurfaceEdgeMetadata | undefined) => void
   readonly selectedPanel?: ShellPanel | null
   readonly placements?: readonly PanelPlacement[]
   readonly selectedPlacementIds?: readonly string[]
   readonly placementSummary?: PanelPlacementSummary
   readonly settings?: PanelGroupSettings
+  /** Copy shown beside array settings to make the editing scope explicit. */
+  readonly settingsScopeLabel?: string
   readonly onSettingsChange?: (patch: Partial<PanelGroupSettings>) => void
   readonly alignStage?: AlignStage
   readonly initialAlignStage?: AlignStage
@@ -184,8 +200,6 @@ const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
   { id: 'obstacle', label: 'Obstacle', shortcut: 'B', description: 'Draw a rectangular obstacle — drag on the active surface (minimum 0.05 m). Press Escape to cancel', icon: Square },
   { id: 'autofill', label: 'Auto-fill', shortcut: 'A', description: 'Preview a filled layout', icon: Sparkles },
   { id: 'align', label: 'Align', shortcut: 'L', description: 'Align selected panels in a preview', icon: Layers3 },
-  { id: 'orbit', label: 'Orbit', shortcut: 'O', description: 'Orbit the 3D view', icon: Rotate3d },
-  { id: 'measure', label: 'Measure', shortcut: 'M', description: 'Measure between two points', icon: SlidersHorizontal },
 ]
 
 const INSPECTOR_TABS: readonly InspectorTab[] = ['panel', 'inspector']
@@ -253,6 +267,10 @@ function numericInputValue(value: number): number | '' {
   return Number.isFinite(value) ? value : ''
 }
 
+function optionalNumericInputValue(value: number | undefined): number | '' {
+  return value === undefined ? '' : numericInputValue(value)
+}
+
 function isEditableTarget(target: EventTarget | null): boolean {
   if (typeof HTMLElement === 'undefined' || !(target instanceof HTMLElement)) return false
   return target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)
@@ -269,6 +287,16 @@ function formatDegrees(value: number): string {
 function formatMillimetres(value: number): string {
   return Number.isFinite(value) ? `${String(Math.round(value * 1000))} mm` : '—'
 }
+
+const surfaceEdgeTypeFromValue = (value: string): SurfaceEdgeType | undefined => {
+  if (value === 'gutter' || value === 'ridge' || value === 'valley' || value === 'rake') return value
+  return undefined
+}
+
+const reverseEdgeDirection = (direction: SurfaceEdgeLine['direction']): SurfaceEdgeLine['direction'] => ({
+  x: direction.x === 0 ? 0 : -direction.x,
+  y: direction.y === 0 ? 0 : -direction.y,
+})
 
 export class ShellErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
   public state: ErrorBoundaryState = { error: null }
@@ -348,16 +376,71 @@ function ViewerPlaceholder({ onImport, onLoadSample, acceptedTypeHint }: { reado
         <div className="viewer-placeholder__icon" aria-hidden="true"><Upload size={20} strokeWidth={1.8} /></div>
         <p className="eyebrow">Start a new design</p>
         <h2>Bring your site into view</h2>
-        <p>{onImport === undefined ? 'Connect an importer to begin placing panels.' : 'Load a model or texture file to begin placing panels.'}</p>
+        <p className="viewer-placeholder__intro">Lightweight Demo is ready in the browser. Import your own WebODM model, or try the sample when you want a full textured house.</p>
         {onImport === undefined ? null : <button className="button button--quiet" type="button" onClick={onImport}><FileUp size={16} aria-hidden="true" />Import site model</button>}
-        {onLoadSample === undefined ? null : <button className="button button--primary" type="button" onClick={onLoadSample} data-testid="load-sample-model"><Sparkles size={16} aria-hidden="true" />Load sample WebODM house</button>}
+        {onLoadSample === undefined ? null : <button className="button button--primary" type="button" onClick={onLoadSample} data-testid="load-sample-model"><Sparkles size={16} aria-hidden="true" />Try WebODM sample</button>}
+        {onLoadSample === undefined ? null : <span className="viewer-placeholder__sample-note">The sample downloads only after you click Try WebODM sample.</span>}
         <span className="viewer-placeholder__hint">{acceptedTypeHint}</span>
       </div>
     </div>
   )
 }
 
-function SurfaceSummary({ surface }: { readonly surface: ShellSurface }): ReactNode {
+function SurfaceSummary({ surface, edge, onEdgeChange }: { readonly surface: ShellSurface; readonly edge?: ShellSurfaceEdge | null; readonly onEdgeChange?: (next: SurfaceEdgeMetadata | undefined) => void }): ReactNode {
+  const disabled = onEdgeChange === undefined
+  const directionLabel = edge === undefined || edge === null
+    ? '—'
+    : `${edge.direction.x.toFixed(2)}, ${edge.direction.y.toFixed(2)}`
+  const emit = (next: SurfaceEdgeMetadata | undefined): void => {
+    if (next === undefined) {
+      onEdgeChange?.(undefined)
+      return
+    }
+    if (isSurfaceEdgeMetadata(next)) onEdgeChange?.(next)
+  }
+  const currentMetadata = (): SurfaceEdgeMetadata => ({
+    type: edge?.type ?? 'gutter',
+    direction: edge?.direction ?? { x: 1, y: 0 },
+    ...(edge?.line === undefined ? {} : { line: edge.line }),
+    ...(edge?.side === undefined ? {} : { side: edge.side }),
+  })
+  const changeType = (value: string): void => {
+    const type = surfaceEdgeTypeFromValue(value)
+    if (type === undefined) {
+      emit(undefined)
+      return
+    }
+    emit({ ...currentMetadata(), type })
+  }
+  const reverse = (): void => {
+    if (edge === undefined || edge === null) return
+    emit({ ...currentMetadata(), direction: reverseEdgeDirection(edge.direction) })
+  }
+  const changeDirection = (axis: 'x' | 'y', rawValue: string): void => {
+    const value = parseFiniteInput(rawValue)
+    if (value === undefined) return
+    const direction = { ...currentMetadata().direction, [axis]: value }
+    emit({ ...currentMetadata(), direction })
+  }
+  const changeLine = (field: 'originX' | 'originY' | 'directionX' | 'directionY', rawValue: string): void => {
+    const value = parseFiniteInput(rawValue)
+    if (value === undefined) return
+    const line = edge?.line ?? { origin: { x: 0, y: 0 }, direction: { x: 1, y: 0 } }
+    const nextLine: SurfaceEdgeLine = field === 'originX'
+      ? { ...line, origin: { ...line.origin, x: value } }
+      : field === 'originY'
+        ? { ...line, origin: { ...line.origin, y: value } }
+        : field === 'directionX'
+          ? { ...line, direction: { ...line.direction, x: value } }
+          : { ...line, direction: { ...line.direction, y: value } }
+    emit({ ...currentMetadata(), line: nextLine })
+  }
+  const changeSide = (value: string): void => {
+    const side: SurfaceEdgeSide | undefined = value === 'left' || value === 'right' ? value : undefined
+    const metadata = currentMetadata()
+    emit(side === undefined ? { type: metadata.type, direction: metadata.direction, ...(metadata.line === undefined ? {} : { line: metadata.line }) } : { ...metadata, side })
+  }
+  const metadataLine = edge?.line
   return (
     <section className="inspector-card inspector-card--surface" aria-labelledby="surface-summary-title">
       <div className="inspector-card__title-row"><h3 id="surface-summary-title">Surface summary</h3><span className="surface-status"><span aria-hidden="true" />Active</span></div>
@@ -367,6 +450,20 @@ function SurfaceSummary({ surface }: { readonly surface: ShellSurface }): ReactN
         <div><dt>Tilt</dt><dd>{formatDegrees(surface.tiltDeg)}</dd></div>
         <div><dt>Usable</dt><dd>{formatArea(surface.usableArea)}</dd></div>
       </dl>
+      <div className="surface-edge-editor" data-testid="surface-edge-editor">
+        <p className="inspector-note">Selected edge</p>
+        <p className="inspector-note" data-testid="surface-edge-path">{edge?.path ?? `Surface ${surface.id} › No edge metadata`}</p>
+        <label className="setting-row"><span>Type</span><select value={edge?.type ?? ''} disabled={disabled} aria-label="Surface edge type" onChange={(event) => { changeType(event.currentTarget.value) }}><option value="">Not set</option><option value="gutter">Gutter</option><option value="ridge">Ridge</option><option value="valley">Valley</option><option value="rake">Rake</option></select></label>
+        <div className="setting-row"><span>Direction</span><span className="surface-edge-direction" data-testid="surface-edge-direction">{directionLabel}</span></div>
+        <label className="setting-row"><span>Direction X</span><input data-testid="surface-edge-direction-x" aria-label="Surface edge direction X" type="number" step="0.1" value={numericInputValue(edge?.direction.x ?? 1)} disabled={disabled || edge === undefined || edge === null} onChange={(event) => { changeDirection('x', event.currentTarget.value) }} /></label>
+        <label className="setting-row"><span>Direction Y</span><input data-testid="surface-edge-direction-y" aria-label="Surface edge direction Y" type="number" step="0.1" value={numericInputValue(edge?.direction.y ?? 0)} disabled={disabled || edge === undefined || edge === null} onChange={(event) => { changeDirection('y', event.currentTarget.value) }} /></label>
+        <label className="setting-row"><span>Line origin X</span><input data-testid="surface-edge-line-origin-x" aria-label="Surface edge line origin X" type="number" step="0.1" value={numericInputValue(metadataLine?.origin.x ?? 0)} disabled={disabled || edge === undefined || edge === null} onChange={(event) => { changeLine('originX', event.currentTarget.value) }} /></label>
+        <label className="setting-row"><span>Line origin Y</span><input data-testid="surface-edge-line-origin-y" aria-label="Surface edge line origin Y" type="number" step="0.1" value={numericInputValue(metadataLine?.origin.y ?? 0)} disabled={disabled || edge === undefined || edge === null} onChange={(event) => { changeLine('originY', event.currentTarget.value) }} /></label>
+        <label className="setting-row"><span>Line direction X</span><input data-testid="surface-edge-line-direction-x" aria-label="Surface edge line direction X" type="number" step="0.1" value={numericInputValue(metadataLine?.direction.x ?? 1)} disabled={disabled || edge === undefined || edge === null} onChange={(event) => { changeLine('directionX', event.currentTarget.value) }} /></label>
+        <label className="setting-row"><span>Line direction Y</span><input data-testid="surface-edge-line-direction-y" aria-label="Surface edge line direction Y" type="number" step="0.1" value={numericInputValue(metadataLine?.direction.y ?? 0)} disabled={disabled || edge === undefined || edge === null} onChange={(event) => { changeLine('directionY', event.currentTarget.value) }} /></label>
+        <label className="setting-row"><span>Interior side</span><select data-testid="surface-edge-side" aria-label="Surface edge interior side" value={edge?.side ?? ''} disabled={disabled || edge === undefined || edge === null || metadataLine === undefined} onChange={(event) => { changeSide(event.currentTarget.value) }}><option value="">Auto / downhill</option><option value="left">Left of line</option><option value="right">Right of line</option></select></label>
+        <button className="button button--quiet button--full" type="button" aria-label="Reverse surface edge direction" disabled={disabled || edge === undefined || edge === null} onClick={reverse}>Reverse direction</button>
+      </div>
     </section>
   )
 }
@@ -384,7 +481,7 @@ function PanelSummary({ panel }: { readonly panel: ShellPanel }): ReactNode {
   )
 }
 
-function SettingsSummary({ settings, onChange }: { readonly settings: PanelGroupSettings; readonly onChange?: (patch: Partial<PanelGroupSettings>) => void }): ReactNode {
+function SettingsSummary({ settings, scopeLabel, onChange }: { readonly settings: PanelGroupSettings; readonly scopeLabel?: string; readonly onChange?: (patch: Partial<PanelGroupSettings>) => void }): ReactNode {
   const disabled = onChange === undefined
   const change = (patch: Partial<PanelGroupSettings>): void => { onChange?.(patch) }
   const changeNumber = (key: 'setbackM' | 'interPanelSpacingM' | 'rowSpacingM' | 'clearanceM' | 'tiltDeg', rawValue: string): void => {
@@ -394,15 +491,34 @@ function SettingsSummary({ settings, onChange }: { readonly settings: PanelGroup
     if (key === 'tiltDeg' && (value < 0 || value > 90)) return
     change({ [key]: value })
   }
+  const changeOptionalNumber = (
+    key: 'modulesPerRow' | 'rowOffsetM' | 'obstacleClearanceM',
+    rawValue: string,
+  ): void => {
+    if (rawValue.trim().length === 0) {
+      change({ [key]: undefined })
+      return
+    }
+    const value = parseFiniteInput(rawValue)
+    if (value === undefined) return
+    if (key === 'modulesPerRow' && (!Number.isInteger(value) || value < 1)) return
+    if ((key === 'rowOffsetM' || key === 'obstacleClearanceM') && value < 0) return
+    change({ [key]: value })
+  }
   return (
     <section className="inspector-card" aria-labelledby="layout-settings-title">
       <div className="inspector-card__title-row"><h3 id="layout-settings-title">Array settings</h3><Settings2 size={15} aria-hidden="true" /></div>
+      <p className="inspector-note settings-scope" data-testid="settings-scope">Editing {scopeLabel ?? 'Global defaults'}</p>
       <label className="setting-row"><span>Orientation</span><select value={settings.orientation} disabled={disabled} aria-label="Panel orientation" onChange={(event) => { change({ orientation: event.currentTarget.value as Orientation }); }}><option value="portrait">Portrait</option><option value="landscape">Landscape</option></select></label>
       <label className="setting-row"><span>Edge setback</span><span className="input-with-unit"><input type="number" min={0} step={0.01} value={numericInputValue(settings.setbackM)} disabled={disabled} aria-label="Edge setback in metres" onChange={(event) => { changeNumber('setbackM', event.currentTarget.value) }} /><small>m</small></span></label>
       <label className="setting-row"><span>Panel spacing</span><span className="input-with-unit"><input type="number" min={0} step={0.01} value={numericInputValue(settings.interPanelSpacingM)} disabled={disabled} aria-label="Panel spacing in metres" onChange={(event) => { changeNumber('interPanelSpacingM', event.currentTarget.value) }} /><small>m</small></span></label>
       <label className="setting-row"><span>Row spacing</span><span className="input-with-unit"><input type="number" min={0} step={0.01} value={numericInputValue(settings.rowSpacingM)} disabled={disabled} aria-label="Row spacing in metres" onChange={(event) => { changeNumber('rowSpacingM', event.currentTarget.value) }} /><small>m</small></span></label>
       <label className="setting-row"><span>Clearance</span><span className="input-with-unit"><input type="number" min={0} step={0.01} value={numericInputValue(settings.clearanceM)} disabled={disabled} aria-label="Panel clearance in metres" onChange={(event) => { changeNumber('clearanceM', event.currentTarget.value) }} /><small>m</small></span></label>
       <label className="setting-row"><span>Tilt</span><span className="input-with-unit"><input type="number" min={0} max={90} step={1} value={numericInputValue(settings.tiltDeg)} disabled={disabled} aria-label="Panel tilt in degrees" onChange={(event) => { changeNumber('tiltDeg', event.currentTarget.value) }} /><small>°</small></span></label>
+      <div className="inspector-subheading">Auto-fill controls</div>
+      <label className="setting-row"><span>Modules per row</span><input data-testid="autofill-modules-per-row" type="number" min={1} step={1} placeholder="Auto" value={optionalNumericInputValue(settings.modulesPerRow)} disabled={disabled} aria-label="Modules per row" onChange={(event) => { changeOptionalNumber('modulesPerRow', event.currentTarget.value) }} /></label>
+      <label className="setting-row"><span>Row offset</span><span className="input-with-unit"><input data-testid="autofill-row-offset" type="number" min={0} step={0.01} placeholder="Auto" value={optionalNumericInputValue(settings.rowOffsetM)} disabled={disabled} aria-label="Row offset in metres" onChange={(event) => { changeOptionalNumber('rowOffsetM', event.currentTarget.value) }} /><small>m</small></span></label>
+      <label className="setting-row"><span>Obstacle clearance</span><span className="input-with-unit"><input data-testid="autofill-obstacle-clearance" type="number" min={0} step={0.01} placeholder="Auto" value={optionalNumericInputValue(settings.obstacleClearanceM)} disabled={disabled} aria-label="Obstacle clearance in metres" onChange={(event) => { changeOptionalNumber('obstacleClearanceM', event.currentTarget.value) }} /><small>m</small></span></label>
       <p className="inspector-note"><SlidersHorizontal size={13} aria-hidden="true" /> Setback {formatMillimetres(settings.setbackM)} · row {formatMillimetres(settings.rowSpacingM)}</p>
     </section>
   )
@@ -438,14 +554,14 @@ function ObstacleSummary({ obstacles, draftObstacle, onRemove, onClear }: { read
   )
 }
 
-function InspectorFallback({ selectedSurface, selectedPanel, settings, onSettingsChange, placementSummary, onAutoFill, obstacles, draftObstacle, onObstacleRemove, onObstaclesClear }: { readonly selectedSurface?: ShellSurface | null; readonly selectedPanel?: ShellPanel | null; readonly settings?: PanelGroupSettings; readonly onSettingsChange?: (patch: Partial<PanelGroupSettings>) => void; readonly placementSummary?: PanelPlacementSummary; readonly onAutoFill?: () => void; readonly obstacles?: readonly RectangularObstacle[]; readonly draftObstacle?: RectangularObstacle | null; readonly onObstacleRemove?: (id: string) => void; readonly onObstaclesClear?: () => void }): ReactNode {
+function InspectorFallback({ selectedSurface, selectedSurfaceEdge, onSurfaceEdgeChange, selectedPanel, settings, settingsScopeLabel, onSettingsChange, placementSummary, onAutoFill, obstacles, draftObstacle, onObstacleRemove, onObstaclesClear }: { readonly selectedSurface?: ShellSurface | null; readonly selectedSurfaceEdge?: ShellSurfaceEdge | null; readonly onSurfaceEdgeChange?: (edge: SurfaceEdgeMetadata | undefined) => void; readonly selectedPanel?: ShellPanel | null; readonly settings?: PanelGroupSettings; readonly settingsScopeLabel?: string; readonly onSettingsChange?: (patch: Partial<PanelGroupSettings>) => void; readonly placementSummary?: PanelPlacementSummary; readonly onAutoFill?: () => void; readonly obstacles?: readonly RectangularObstacle[]; readonly draftObstacle?: RectangularObstacle | null; readonly onObstacleRemove?: (id: string) => void; readonly onObstaclesClear?: () => void }): ReactNode {
   if (selectedSurface === undefined && selectedPanel === undefined && settings === undefined && placementSummary === undefined && obstacles === undefined) return <EmptySlot label="Inspector" />
   return (
     <div className="inspector-content">
       <div className="inspector-heading"><div><p className="eyebrow">Inspector</p><h2>{selectedSurface?.label ?? 'Selection'}</h2></div><span className="surface-status"><span aria-hidden="true" />Active</span></div>
-      {selectedSurface === null ? <EmptySlot label="Surface" /> : selectedSurface === undefined ? null : <SurfaceSummary surface={selectedSurface} />}
+      {selectedSurface === null ? <EmptySlot label="Surface" /> : selectedSurface === undefined ? null : <SurfaceSummary surface={selectedSurface} edge={selectedSurfaceEdge} onEdgeChange={onSurfaceEdgeChange} />}
       {selectedPanel === null ? null : selectedPanel === undefined ? null : <PanelSummary panel={selectedPanel} />}
-      {settings === undefined ? null : <SettingsSummary settings={settings} onChange={onSettingsChange} />}
+      {settings === undefined ? null : <SettingsSummary settings={settings} scopeLabel={settingsScopeLabel} onChange={onSettingsChange} />}
       {placementSummary === undefined ? null : <PlacementSummary summary={placementSummary} />}
       {obstacles === undefined ? null : <ObstacleSummary obstacles={obstacles} draftObstacle={draftObstacle} onRemove={onObstacleRemove} onClear={onObstaclesClear} />}
       {onAutoFill === undefined ? null : <button className="button button--primary button--full" type="button" onClick={onAutoFill}><Sparkles size={15} aria-hidden="true" />Auto-fill surface</button>}
@@ -552,11 +668,14 @@ export function Shell({
   initialActiveTool = 'select',
   onToolChange,
   selectedSurface,
+  selectedSurfaceEdge,
+  onSurfaceEdgeChange,
   selectedPanel,
   placements,
   selectedPlacementIds = [],
   placementSummary,
   settings,
+  settingsScopeLabel,
   onSettingsChange,
   alignStage: controlledAlignStage,
   initialAlignStage = 'idle',
@@ -599,13 +718,20 @@ export function Shell({
   const [selectedTab, setSelectedTab] = useState<InspectorTab>('panel')
   const [shortcutsOpen, setShortcutsOpen] = useState(false)
   const [mobileToolsOpen, setMobileToolsOpen] = useState(false)
+  const [compactViewport, setCompactViewport] = useState(() => isCompactViewport())
   const [rightPanelOpen, setRightPanelOpen] = useState(() => !isCompactViewport())
   const [localStatus, setLocalStatus] = useState('Ready')
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const mobileMenuButtonRef = useRef<HTMLButtonElement>(null)
+  const mobileFirstToolRef = useRef<HTMLButtonElement>(null)
+  const reopenInspectorRef = useRef<HTMLButtonElement>(null)
   const panelTabRef = useRef<HTMLButtonElement>(null)
   const inspectorTabRef = useRef<HTMLButtonElement>(null)
   const alignDialogRef = useRef<HTMLDivElement>(null)
   const alignReturnFocusRef = useRef<HTMLElement | null>(null)
+  const previousCompactViewportRef = useRef(compactViewport)
+  const previousMobileToolsOpenRef = useRef(mobileToolsOpen)
+  const previousRightPanelOpenRef = useRef(rightPanelOpen)
   // Start from idle so an initially-open controlled dialog receives focus on mount.
   const previousAlignStageRef = useRef<AlignStage>('idle')
   const detectedWebGL = useMemo(() => (webglAvailable === undefined ? supportsWebGL() : webglAvailable), [webglAvailable])
@@ -620,6 +746,42 @@ export function Shell({
   const panelSlot = panelChooser ?? library
   const importHandler = onImport ?? onImportModel
   const hasImportHandler = onImportFiles !== undefined || importHandler !== undefined
+
+  const closeMobileTools = useCallback((): void => {
+    setMobileToolsOpen(false)
+  }, [])
+  const closeRightPanel = useCallback((): void => {
+    setRightPanelOpen(false)
+  }, [])
+
+  useEffect(() => {
+    const handleResize = (): void => {
+      const nextCompact = isCompactViewport()
+      setCompactViewport(nextCompact)
+      const previousCompact = previousCompactViewportRef.current
+      previousCompactViewportRef.current = nextCompact
+      if (previousCompact !== nextCompact) {
+        setRightPanelOpen(!nextCompact)
+        setMobileToolsOpen(false)
+      }
+    }
+    window.addEventListener('resize', handleResize)
+    return () => { window.removeEventListener('resize', handleResize) }
+  }, [])
+
+  useEffect(() => {
+    const previous = previousMobileToolsOpenRef.current
+    previousMobileToolsOpenRef.current = mobileToolsOpen
+    if (previous === mobileToolsOpen) return
+    if (mobileToolsOpen) mobileFirstToolRef.current?.focus()
+    else mobileMenuButtonRef.current?.focus()
+  }, [mobileToolsOpen])
+
+  useEffect(() => {
+    const previous = previousRightPanelOpenRef.current
+    previousRightPanelOpenRef.current = rightPanelOpen
+    if (previous && !rightPanelOpen) reopenInspectorRef.current?.focus()
+  }, [rightPanelOpen])
 
   useEffect(() => {
     if (typeof document !== 'undefined') document.documentElement.dataset.theme = theme
@@ -767,8 +929,8 @@ export function Shell({
       if (key === 'escape' && activeTool === 'obstacle') {
         event.preventDefault()
         setShortcutsOpen(false)
-        setMobileToolsOpen(false)
-        if (rightPanelOpen) setRightPanelOpen(false)
+        closeMobileTools()
+        if (compactViewport && rightPanelOpen) closeRightPanel()
         cancelObstacle()
         return
       }
@@ -796,7 +958,7 @@ export function Shell({
         deleteSelection()
         return
       }
-      if (key === 'escape') { setShortcutsOpen(false); setMobileToolsOpen(false); if (rightPanelOpen) setRightPanelOpen(false); if (activeTool === 'obstacle') cancelObstacle(); if (alignStage !== 'idle') cancelAlign(); return }
+      if (key === 'escape') { setShortcutsOpen(false); closeMobileTools(); if (compactViewport && rightPanelOpen) closeRightPanel(); if (activeTool === 'obstacle') cancelObstacle(); if (alignStage !== 'idle') cancelAlign(); return }
       if (key === '?') { event.preventDefault(); setShortcutsOpen((open) => !open); return }
       const nudge: Record<string, Point2> = { arrowup: { x: 0, y: nudgeStepM }, arrowdown: { x: 0, y: -nudgeStepM }, arrowleft: { x: -nudgeStepM, y: 0 }, arrowright: { x: nudgeStepM, y: 0 } }
       const delta = nudge[key]
@@ -806,7 +968,7 @@ export function Shell({
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => { window.removeEventListener('keydown', handleKeyDown); }
-  }, [activateTool, activeTool, alignStage, canRedo, canUndo, cancelAlign, cancelObstacle, deleteSelection, nudgeStepM, onDelete, onNudgeSelection, onRedo, onUndo, rightPanelOpen, selectedPlacementIds.length])
+  }, [activateTool, activeTool, alignStage, canRedo, canUndo, cancelAlign, cancelObstacle, closeMobileTools, closeRightPanel, compactViewport, deleteSelection, nudgeStepM, onDelete, onNudgeSelection, onRedo, onUndo, rightPanelOpen, selectedPlacementIds.length])
 
   const handleViewerKeyDown = useCallback((event: ReactKeyboardEvent<HTMLDivElement>): void => {
     if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); activateTool('select'); announce('Surface selection active') }
@@ -819,38 +981,43 @@ export function Shell({
     <div className={`pv-shell pv-shell--${theme} ${className}`.trim()} data-testid="pv-shell">
       <header className="topbar">
         <div className="topbar__brand">
-          <button className="mobile-menu-button icon-button" type="button" aria-label="Open design tools" aria-expanded={mobileToolsOpen} onClick={() => { setMobileToolsOpen((open) => !open); }}><Menu size={18} aria-hidden="true" /></button>
+          <button ref={mobileMenuButtonRef} className="mobile-menu-button icon-button" type="button" aria-label={mobileToolsOpen ? 'Close design tools' : 'Open design tools'} aria-expanded={mobileToolsOpen} aria-controls="design-tools" onClick={() => { setMobileToolsOpen((open) => !open); }}><Menu size={18} aria-hidden="true" /></button>
           <span className="brand-mark" aria-hidden="true"><Sun size={17} strokeWidth={2.1} /></span><h1>PV Studio</h1><span className="brand-divider" aria-hidden="true" />
           {projectName === undefined ? <span className="brand-context">Design workspace</span> : <span className="brand-context">{projectName}</span>}
         </div>
         <div className="topbar__actions">
           <input ref={fileInputRef} className="sr-only" type="file" accept={acceptedImportTypes} multiple aria-label="Import site model" tabIndex={-1} disabled={!hasImportHandler} onChange={handleFileChange} />
           <button className="topbar-action topbar-action--import" type="button" disabled={!hasImportHandler} onClick={handleImportClick}><Upload size={15} aria-hidden="true" /><span>Import</span></button>
-          <button className="topbar-action topbar-action--sample" type="button" disabled={onLoadSample === undefined} onClick={onLoadSample} aria-label="Load sample WebODM house" data-testid="load-sample-model"><Sparkles size={15} aria-hidden="true" /><span>Try sample</span></button>
+          {onLoadSample === undefined ? null : <>
+            <span id="sample-description" className="sr-only">Lightweight Demo stays in this browser. Try sample loads the WebODM house only after you click.</span>
+            <button className="topbar-action topbar-action--sample" type="button" onClick={onLoadSample} aria-label="Try WebODM sample" aria-describedby="sample-description" data-testid="load-sample-model"><Sparkles size={15} aria-hidden="true" /><span>Try sample</span></button>
+          </>}
           <ShellErrorBoundary area="header actions" resetKey={headerSlot ?? 'empty-header'}>{headerSlot}</ShellErrorBoundary>
-          <button className="icon-button" type="button" aria-label="Help and documentation" title="Help and documentation" disabled={onHelp === undefined} onClick={onHelp}><CircleHelp size={17} aria-hidden="true" /></button>
+          {onHelp === undefined ? null : <button className="icon-button" type="button" aria-label="Help and documentation" title="Help and documentation" onClick={onHelp}><CircleHelp size={17} aria-hidden="true" /></button>}
           <button className="icon-button" type="button" aria-label={`Switch to ${theme === 'light' ? 'dark' : 'light'} theme`} title={`Switch to ${theme === 'light' ? 'dark' : 'light'} theme`} onClick={handleThemeChange}>{theme === 'light' ? <Moon size={17} aria-hidden="true" /> : <Sun size={17} aria-hidden="true" />}</button>
         </div>
       </header>
 
       <div className="workspace-layout">
-        <aside className={`tool-rail${mobileToolsOpen ? ' tool-rail--mobile-open' : ''}`} aria-label="Design tools">
+        <aside id="design-tools" className={`tool-rail${mobileToolsOpen ? ' tool-rail--mobile-open' : ''}`} aria-label="Design tools" aria-hidden={compactViewport && !mobileToolsOpen} inert={compactViewport && !mobileToolsOpen}>
           <div className="tool-rail__section"><p className="tool-rail__label">Tools</p><nav className="tool-nav" aria-label="Placement tools">
-            {TOOL_DEFINITIONS.map((tool) => { const Icon = tool.icon; const isActive = activeTool === tool.id; const unavailable = (tool.id === 'align' && onAlignStart === undefined) || (tool.id === 'autofill' && onAutoFill === undefined) || (tool.id === 'obstacle' && (onObstacleStart === undefined || selectedSurface === undefined || selectedSurface === null)); return <button className={`tool-button${isActive ? ' tool-button--active' : ''}`} type="button" key={tool.id} aria-pressed={isActive} title={`${tool.label} (${tool.shortcut})`} disabled={unavailable} onClick={() => { activateTool(tool.id); }}><Icon size={18} strokeWidth={isActive ? 2.1 : 1.75} aria-hidden="true" /><span>{tool.label}</span><kbd>{tool.shortcut}</kbd></button> })}
+            {TOOL_DEFINITIONS.map((tool, index) => { const Icon = tool.icon; const isActive = activeTool === tool.id; const unavailable = (tool.id === 'align' && onAlignStart === undefined) || (tool.id === 'autofill' && onAutoFill === undefined) || (tool.id === 'obstacle' && (onObstacleStart === undefined || selectedSurface === undefined || selectedSurface === null)); return <button ref={index === 0 ? mobileFirstToolRef : undefined} className={`tool-button${isActive ? ' tool-button--active' : ''}`} type="button" key={tool.id} aria-label={tool.label} aria-pressed={isActive} title={`${tool.label} (${tool.shortcut})`} disabled={unavailable} onClick={() => { activateTool(tool.id); }}><Icon size={18} strokeWidth={isActive ? 2.1 : 1.75} aria-hidden="true" /><span>{tool.label}</span><kbd>{tool.shortcut}</kbd></button> })}
           </nav></div>
-          <div className="tool-rail__bottom"><button className="tool-button tool-button--muted" type="button" title="Project layers" aria-label="Project layers" disabled={onLayersOpen === undefined} onClick={onLayersOpen}><Layers3 size={18} strokeWidth={1.75} aria-hidden="true" /><span>Layers</span></button><button className="tool-button tool-button--muted" type="button" title="Design settings" onClick={() => { setSelectedTab('inspector'); setRightPanelOpen(true); }}><SlidersHorizontal size={18} strokeWidth={1.75} aria-hidden="true" /><span>Settings</span></button></div>
+          <div className="tool-rail__bottom">{onLayersOpen === undefined ? null : <button className="tool-button tool-button--muted" type="button" title="Project layers" aria-label="Project layers" onClick={onLayersOpen}><Layers3 size={18} strokeWidth={1.75} aria-hidden="true" /><span>Layers</span></button>}<button className="tool-button tool-button--muted" type="button" title="Design settings" onClick={() => { setSelectedTab('inspector'); setRightPanelOpen(true); }}><SlidersHorizontal size={18} strokeWidth={1.75} aria-hidden="true" /><span>Settings</span></button></div>
         </aside>
 
         <main className="design-stage" aria-label="Design workspace">
           <div className="stage-toolbar">
             <div className="stage-toolbar__group" role="group" aria-label="Camera mode"><button className={`view-toggle${cameraMode === '3d' ? ' view-toggle--active' : ''}`} type="button" aria-pressed={cameraMode === '3d'} onClick={() => { setCameraMode('3d'); }}><Move3d size={14} aria-hidden="true" />3D</button><button className={`view-toggle${cameraMode === '2d' ? ' view-toggle--active' : ''}`} type="button" aria-pressed={cameraMode === '2d'} onClick={() => { setCameraMode('2d'); }}><PanelTop size={14} aria-hidden="true" />2D plan</button></div>
             <div className="stage-toolbar__group" role="group" aria-label="Render mode"><button className={`view-toggle${renderMode === 'texture' ? ' view-toggle--active' : ''}`} type="button" aria-pressed={renderMode === 'texture'} onClick={() => { setRenderMode('texture'); }}>Texture</button><button className={`view-toggle${renderMode === 'wireframe' ? ' view-toggle--active' : ''}`} type="button" aria-pressed={renderMode === 'wireframe'} onClick={() => { setRenderMode('wireframe'); }}>Wire</button></div>
-            <div className="stage-toolbar__group stage-toolbar__group--right"><button className={`stage-icon-button${showGrid ? ' stage-icon-button--active' : ''}`} type="button" aria-pressed={showGrid} aria-label={`${showGrid ? 'Hide' : 'Show'} layout grid`} title={`${showGrid ? 'Hide' : 'Show'} layout grid`} onClick={setGrid}><Grid2X2 size={16} aria-hidden="true" /></button><button className="stage-icon-button" type="button" aria-label="Fit model to view" title="Fit model to view" disabled={onFitView === undefined} onClick={onFitView}><Maximize2 size={16} aria-hidden="true" /></button><span className="toolbar-divider" aria-hidden="true" /><button className="stage-icon-button" type="button" aria-label="Undo" title="Undo" disabled={!canUndo || onUndo === undefined} onClick={onUndo}><Redo2 size={16} className="icon-flip-x" aria-hidden="true" /></button><button className="stage-icon-button" type="button" aria-label="Redo" title="Redo" disabled={!canRedo || onRedo === undefined} onClick={onRedo}><Redo2 size={16} aria-hidden="true" /></button></div>
+            <div className="stage-toolbar__group stage-toolbar__group--right"><button className={`stage-icon-button${showGrid ? ' stage-icon-button--active' : ''}`} type="button" aria-pressed={showGrid} aria-label={`${showGrid ? 'Hide' : 'Show'} layout grid`} title={`${showGrid ? 'Hide' : 'Show'} layout grid`} onClick={setGrid}><Grid2X2 size={16} aria-hidden="true" /></button>{onFitView === undefined ? null : <button className="stage-icon-button" type="button" aria-label="Fit model to view" title="Fit model to view" onClick={onFitView}><Maximize2 size={16} aria-hidden="true" /></button>}<span className="toolbar-divider" aria-hidden="true" /><button className="stage-icon-button" type="button" aria-label="Undo" title="Undo" disabled={!canUndo || onUndo === undefined} onClick={onUndo}><Redo2 size={16} className="icon-flip-x" aria-hidden="true" /></button><button className="stage-icon-button" type="button" aria-label="Redo" title="Redo" disabled={!canRedo || onRedo === undefined} onClick={onRedo}><Redo2 size={16} aria-hidden="true" /></button></div>
           </div>
 
           <div className={`viewer-frame viewer-frame--${cameraMode}${showGrid && cameraMode === '2d' ? ' viewer-frame--grid' : ''}${alignStage !== 'idle' ? ' viewer-frame--align-preview' : ''}`}>
-            <div className="viewer-frame__canvas" tabIndex={0} role="application" aria-label={`${cameraMode === '3d' ? '3D' : '2D'} site viewer. Press Enter to select a surface.`} onKeyDown={handleViewerKeyDown}><ShellErrorBoundary area="site viewer" resetKey={viewer ?? (hasWebGL ? `placeholder:${acceptedImportTypes}:${hasImportHandler ? 'ready' : 'disabled'}` : 'webgl-fallback')}>{viewerContent}</ShellErrorBoundary></div>
+            <div className="viewer-frame__canvas" tabIndex={0} role="region" aria-label={`${cameraMode === '3d' ? '3D' : '2D'} site viewer. Drag to orbit, scroll or pinch to zoom, and shift-drag or two-finger drag to pan. Press Enter to select a surface.`} onKeyDown={handleViewerKeyDown}><ShellErrorBoundary area="site viewer" resetKey={viewer ?? (hasWebGL ? `placeholder:${acceptedImportTypes}:${hasImportHandler ? 'ready' : 'disabled'}` : 'webgl-fallback')}>{viewerContent}</ShellErrorBoundary></div>
             <div className="viewer-overlay viewer-overlay--top-left"><span className="view-status"><span className="view-status__dot" aria-hidden="true" />{cameraMode === '3d' ? 'Perspective' : 'Top-down plan'}</span><span className="view-status view-status--secondary">{renderMode === 'texture' ? 'Textured' : 'Wireframe'}</span></div>
+            <div className="viewer-overlay viewer-overlay--top-right viewer-navigation-hint" role="note">Drag to orbit · wheel/pinch to zoom · shift-drag/two fingers to pan</div>
+            {onLoadSample !== undefined && projectName === undefined ? <div className="viewer-onboarding" role="note"><p className="eyebrow">Lightweight Demo</p><p>Demo stays in this browser. Use the <strong>Try WebODM sample</strong> action when you want to load a textured house. Nothing downloads until you choose it.</p></div> : null}
             {activeTool === 'obstacle' ? <div className="viewer-overlay viewer-overlay--bottom-right obstacle-drawing-hint" role="status" aria-live="polite">Drag on the active surface to draw an obstacle (minimum 0.05 m). Press <kbd>Esc</kbd> to cancel.</div> : null}
             {selectedSurface === undefined || selectedSurface === null ? null : <div className="viewer-overlay viewer-overlay--bottom-left"><span className="surface-chip"><span className="surface-chip__swatch" aria-hidden="true" />{selectedSurface.label ?? selectedSurface.id}<span className="surface-chip__muted">· {formatArea(selectedSurface.area)}</span></span></div>}
             <AlignmentBanner stage={alignStage} preview={alignPreview} onConfirm={onAlignConfirm === undefined ? undefined : confirmAlign} onCancel={controlledAlignStage !== undefined && onAlignCancel === undefined ? undefined : cancelAlign} dialogRef={alignDialogRef} />
@@ -859,12 +1026,12 @@ export function Shell({
           <div className="stage-footer"><div className="stage-footer__hint"><Keyboard size={14} aria-hidden="true" /><span>Press <kbd>?</kbd> for shortcuts</span></div><div className="stage-footer__actions"><button className="stage-footer__action" type="button" aria-label="Undo last action" disabled={!canUndo || onUndo === undefined} onClick={onUndo}><Redo2 className="icon-flip-x" size={14} aria-hidden="true" />Undo</button><button className="stage-footer__action" type="button" aria-label="Redo last action" disabled={!canRedo || onRedo === undefined} onClick={onRedo}><Redo2 size={14} aria-hidden="true" />Redo</button>{onDelete === undefined ? null : <button className="stage-footer__action stage-footer__action--danger" type="button" aria-label="Delete selected panels" disabled={selectedPlacementIds.length === 0} onClick={deleteSelection}><X size={14} aria-hidden="true" />Delete</button>}</div></div>
         </main>
 
-        {rightPanelOpen ? <button className="inspector-backdrop" type="button" aria-label="Dismiss side panel" onClick={() => { setRightPanelOpen(false); }} /> : null}
-        <aside className={`inspector-panel${rightPanelOpen ? ' inspector-panel--open' : ''}`} aria-label="Panel library and inspector">
-          <div className="inspector-tabs" role="tablist" aria-orientation="horizontal" aria-label="Workspace side panel"><button ref={panelTabRef} className={`inspector-tab${selectedTab === 'panel' ? ' inspector-tab--active' : ''}`} id="panel-tab" type="button" role="tab" aria-selected={selectedTab === 'panel'} aria-controls="panel-panel" tabIndex={selectedTab === 'panel' ? 0 : -1} onKeyDown={handleInspectorTabKeyDown} onClick={() => { setSelectedTab('panel'); }}><PanelsTopLeft size={15} aria-hidden="true" />Panel</button><button ref={inspectorTabRef} className={`inspector-tab${selectedTab === 'inspector' ? ' inspector-tab--active' : ''}`} id="inspector-tab" type="button" role="tab" aria-selected={selectedTab === 'inspector'} aria-controls="inspector-panel" tabIndex={selectedTab === 'inspector' ? 0 : -1} onKeyDown={handleInspectorTabKeyDown} onClick={() => { setSelectedTab('inspector'); }}><Settings2 size={15} aria-hidden="true" />Inspector</button><button className="inspector-close icon-button icon-button--small" type="button" aria-label="Close side panel" onClick={() => { setRightPanelOpen(false); }}><X size={15} aria-hidden="true" /></button></div>
-          <div className="inspector-panel__body">{selectedTab === 'panel' ? <div id="panel-panel" role="tabpanel" aria-labelledby="panel-tab"><ShellErrorBoundary area="panel library" resetKey={panelSlot ?? `empty-library:${hasImportHandler ? 'ready' : 'disabled'}`}>{panelSlot ?? <EmptySlot label="Panel library" action={hasImportHandler ? 'Import site model' : undefined} onAction={hasImportHandler ? handleImportClick : undefined} />}</ShellErrorBoundary></div> : <div id="inspector-panel" role="tabpanel" aria-labelledby="inspector-tab"><ShellErrorBoundary area="inspector" resetKey={inspector ?? settings ?? selectedSurface ?? selectedPanel ?? summary ?? obstacles ?? 'fallback-inspector'}>{inspector ?? <InspectorFallback selectedSurface={selectedSurface} selectedPanel={selectedPanel} settings={settings} onSettingsChange={onSettingsChange} placementSummary={summary} onAutoFill={onAutoFill} obstacles={obstacles} draftObstacle={draftObstacle} onObstacleRemove={onObstacleRemove} onObstaclesClear={onObstaclesClear} />}</ShellErrorBoundary>{panelStatus === undefined ? null : <div className="panel-status-slot"><ShellErrorBoundary area="panel status" resetKey={panelStatus}>{panelStatus}</ShellErrorBoundary></div>}{panelStatus === undefined && summary === undefined ? null : panelStatus === undefined ? <div className="panel-status-slot"><PlacementSummary summary={summary as PanelPlacementSummary} /></div> : null}</div>}</div>
+        {rightPanelOpen ? <button className="inspector-backdrop" type="button" aria-label="Dismiss side panel" onClick={closeRightPanel} /> : null}
+        <aside id="workspace-side-panel" className={`inspector-panel${rightPanelOpen ? ' inspector-panel--open' : ''}`} aria-label="Panel library and inspector" aria-hidden={!rightPanelOpen} inert={!rightPanelOpen}>
+          <div className="inspector-tabs" role="tablist" aria-orientation="horizontal" aria-label="Workspace side panel"><button ref={panelTabRef} className={`inspector-tab${selectedTab === 'panel' ? ' inspector-tab--active' : ''}`} id="panel-tab" type="button" role="tab" aria-selected={selectedTab === 'panel'} aria-controls="panel-panel" tabIndex={selectedTab === 'panel' ? 0 : -1} onKeyDown={handleInspectorTabKeyDown} onClick={() => { setSelectedTab('panel'); }}><PanelsTopLeft size={15} aria-hidden="true" />Panel</button><button ref={inspectorTabRef} className={`inspector-tab${selectedTab === 'inspector' ? ' inspector-tab--active' : ''}`} id="inspector-tab" type="button" role="tab" aria-selected={selectedTab === 'inspector'} aria-controls="inspector-panel" tabIndex={selectedTab === 'inspector' ? 0 : -1} onKeyDown={handleInspectorTabKeyDown} onClick={() => { setSelectedTab('inspector'); }}><Settings2 size={15} aria-hidden="true" />Inspector</button><button className="inspector-close icon-button icon-button--small" type="button" aria-label="Close side panel" onClick={closeRightPanel}><X size={15} aria-hidden="true" /></button></div>
+          <div className="inspector-panel__body">{selectedTab === 'panel' ? <div id="panel-panel" role="tabpanel" aria-labelledby="panel-tab"><ShellErrorBoundary area="panel library" resetKey={panelSlot ?? `empty-library:${hasImportHandler ? 'ready' : 'disabled'}`}>{panelSlot ?? <EmptySlot label="Panel library" action={hasImportHandler ? 'Import site model' : undefined} onAction={hasImportHandler ? handleImportClick : undefined} />}</ShellErrorBoundary></div> : <div id="inspector-panel" role="tabpanel" aria-labelledby="inspector-tab"><ShellErrorBoundary area="inspector" resetKey={inspector ?? settingsScopeLabel ?? settings ?? selectedSurface ?? selectedSurfaceEdge ?? selectedPanel ?? summary ?? obstacles ?? 'fallback-inspector'}>{inspector ?? <InspectorFallback selectedSurface={selectedSurface} selectedSurfaceEdge={selectedSurfaceEdge} onSurfaceEdgeChange={onSurfaceEdgeChange} selectedPanel={selectedPanel} settings={settings} settingsScopeLabel={settingsScopeLabel} onSettingsChange={onSettingsChange} placementSummary={summary} onAutoFill={onAutoFill} obstacles={obstacles} draftObstacle={draftObstacle} onObstacleRemove={onObstacleRemove} onObstaclesClear={onObstaclesClear} />}</ShellErrorBoundary>{panelStatus === undefined ? null : <div className="panel-status-slot"><ShellErrorBoundary area="panel status" resetKey={panelStatus}>{panelStatus}</ShellErrorBoundary></div>}{panelStatus === undefined && summary === undefined ? null : panelStatus === undefined ? <div className="panel-status-slot"><PlacementSummary summary={summary as PanelPlacementSummary} /></div> : null}</div>}</div>
         </aside>
-        {!rightPanelOpen ? <button className="reopen-inspector" type="button" onClick={() => { setRightPanelOpen(true); }}><PanelTop size={15} aria-hidden="true" />Open panel</button> : null}
+        {!rightPanelOpen ? <button ref={reopenInspectorRef} className="reopen-inspector" type="button" aria-controls="workspace-side-panel" aria-expanded={rightPanelOpen} onClick={() => { setRightPanelOpen(true); }}><PanelTop size={15} aria-hidden="true" />Open panel</button> : null}
       </div>
 
       <footer className="statusbar" aria-label="Workspace status"><div className="statusbar__left" role="status" aria-live="polite"><span className="connection-indicator"><span aria-hidden="true" />Local workspace</span><span className="statusbar-divider" aria-hidden="true" />{externalStatusMessage ?? localStatus}</div><div className="statusbar__right"><span>Metric units</span><span className="statusbar-divider" aria-hidden="true" /><button type="button" onClick={() => { setShortcutsOpen(true); }}><Keyboard size={13} aria-hidden="true" />Shortcuts</button></div></footer>

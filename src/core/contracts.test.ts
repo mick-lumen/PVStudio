@@ -7,6 +7,8 @@ import {
   createPanelGroupSettings,
   createPanelPlacement,
   createSurfaceDescriptor,
+  createSurfaceEdge,
+  createSurfaceEdgeMetadata,
   isAutoFillPreview,
   isAutoFillCandidate,
   isPanelDefinition,
@@ -16,6 +18,12 @@ import {
   isRect,
   isSurfaceNormal,
   isSurfaceSelection,
+  isSurfaceDescriptor,
+  isSurfaceEdge,
+  isSurfaceEdgeMetadata,
+  isSurfaceEdgeSide,
+  isSurfaceEdgeType,
+  SURFACE_EDGE_DIRECTION_EPSILON,
 } from './index'
 import type {
   AutoFillPreview,
@@ -98,6 +106,30 @@ describe('core contract guards', () => {
     expect(isSurfaceSelection(selection)).toBe(true)
     expect(isSurfaceSelection({ ...selection, worldPoint: { x: 0, y: 0, z: Number.NaN } })).toBe(false)
   })
+
+  it('validates typed edge metadata while retaining legacy omission semantics', () => {
+    const gutter = {
+      type: 'gutter' as const,
+      direction: { x: 1, y: 0 },
+      line: { origin: { x: 0, y: 0 }, direction: { x: 1, y: 0 } },
+    }
+    expect(isSurfaceEdgeType('ridge')).toBe(true)
+    expect(isSurfaceEdgeType('eave')).toBe(false)
+    expect(isSurfaceEdgeMetadata(gutter)).toBe(true)
+    expect(isSurfaceEdgeMetadata({ ...gutter, direction: { x: 0, y: 0 } })).toBe(false)
+    expect(isSurfaceEdgeSide('left')).toBe(true)
+    expect(isSurfaceEdgeSide('right')).toBe(true)
+    expect(isSurfaceEdgeSide('downhill')).toBe(false)
+    expect(isSurfaceEdgeMetadata({ ...gutter, side: 'left' })).toBe(true)
+    expect(isSurfaceEdgeMetadata({ type: 'gutter', direction: { x: 1, y: 0 }, side: 'left' })).toBe(false)
+    expect(isSurfaceEdgeMetadata({ ...gutter, side: 'downhill' })).toBe(false)
+    expect(isSurfaceEdgeMetadata({ ...gutter, direction: { x: SURFACE_EDGE_DIRECTION_EPSILON, y: 0 } })).toBe(false)
+    expect(isSurfaceEdgeMetadata({ ...gutter, direction: { x: SURFACE_EDGE_DIRECTION_EPSILON * 2, y: 0 } })).toBe(true)
+    expect(isSurfaceEdge({ surfaceId: 'roof-east', ...gutter })).toBe(true)
+    expect(isSurfaceEdge({ surfaceId: '', ...gutter })).toBe(false)
+    expect(isSurfaceDescriptor({ ...descriptor, edge: gutter })).toBe(true)
+    expect(isSurfaceDescriptor({ ...descriptor, edge: { ...gutter, type: 'eave' } })).toBe(false)
+  })
 })
 
 describe('immutable serialisable constructors', () => {
@@ -116,6 +148,18 @@ describe('immutable serialisable constructors', () => {
     const frozenDescriptor = createSurfaceDescriptor(descriptor)
     expect(Object.isFrozen(frozenDescriptor.faceRefs[0])).toBe(true)
     expect(Object.isFrozen(frozenDescriptor.frame)).toBe(true)
+
+    const edge = createSurfaceEdgeMetadata({
+      type: 'ridge',
+      direction: { x: 0, y: 2 },
+      line: { origin: { x: 0, y: 1 }, direction: { x: 1, y: 0 } },
+    })
+    expect(Object.isFrozen(edge)).toBe(true)
+    expect(Object.isFrozen(edge.direction)).toBe(true)
+    expect(edge.direction).toEqual({ x: 0, y: 2 })
+    const keyedEdge = createSurfaceEdge({ surfaceId: ' roof-east ', ...edge })
+    expect(keyedEdge.surfaceId).toBe('roof-east')
+    expect(Object.isFrozen(keyedEdge.line)).toBe(true)
 
     expect(source.request.settings.clearanceM).toBe(0.1)
     expect(frozen.request.settings.clearanceM).toBe(0.1)

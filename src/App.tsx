@@ -13,11 +13,19 @@ import type {
   Point2,
   RectangularObstacle,
   SurfaceDescriptor,
+  SurfaceEdge,
+  SurfaceEdgeMetadata,
   SurfaceSelection,
 } from './core'
 import { projectPointToSurface } from './core'
 import { PANEL_CATALOG, toPanelDefinition, type PanelSpec } from './data'
-import { createPlacementStore, type PlacementState, type PlacementStore } from './placement'
+import {
+  createPlacementStore,
+  editableGroupIdFor,
+  type PlacementState,
+  type PlacementStore,
+  type SurfaceGutter,
+} from './placement'
 import { PanelChooser } from './panels'
 import {
   PanelLayer,
@@ -30,6 +38,7 @@ import {
   type AlignPreviewState,
   type ShellPanel,
   type ShellSurface,
+  type ShellSurfaceEdge,
   type ToolId,
   type ViewMode,
   type RenderMode,
@@ -95,6 +104,27 @@ const sameRegion = (first: SurfaceDescriptor['region'], second: SurfaceDescripto
   return first.x === second.x && first.y === second.y && first.width === second.width && first.height === second.height
 }
 
+const sameSurfaceEdge = (first: SurfaceDescriptor['edge'], second: SurfaceDescriptor['edge']): boolean => {
+  if (first === second) return true
+  if (first === undefined || second === undefined
+    || first.type !== second.type
+    || first.side !== second.side
+    || first.direction.x !== second.direction.x
+    || first.direction.y !== second.direction.y) return false
+  const firstLine = first.line
+  const secondLine = second.line
+  if (firstLine === secondLine) return true
+  if (firstLine === undefined || secondLine === undefined) return false
+  return firstLine.origin.x === secondLine.origin.x
+    && firstLine.origin.y === secondLine.origin.y
+    && firstLine.direction.x === secondLine.direction.x
+    && firstLine.direction.y === secondLine.direction.y
+}
+
+const isSurfaceEdgeOverrideMap = (
+  source: PlacementStore['context']['gutters'],
+): source is Readonly<Record<string, SurfaceGutter | null>> => source !== undefined && !Array.isArray(source)
+
 const sameSurfaceDescriptor = (first: SurfaceDescriptor, second: SurfaceDescriptor): boolean => {
   if (first === second) return true
   if (first.id !== second.id || first.area !== second.area || first.azimuthDeg !== second.azimuthDeg
@@ -106,6 +136,7 @@ const sameSurfaceDescriptor = (first: SurfaceDescriptor, second: SurfaceDescript
     || !samePoint3(firstFrame.tangentX, secondFrame.tangentX)
     || !samePoint3(firstFrame.tangentY, secondFrame.tangentY)
     || !sameRegion(first.region, second.region)
+    || !sameSurfaceEdge(first.edge, second.edge)
     || first.faceRefs.length !== second.faceRefs.length) return false
   return first.faceRefs.every((faceRef, index) => {
     const other = second.faceRefs[index]
@@ -132,6 +163,7 @@ interface ActiveSurfaceDrag {
   readonly panelId: string
   readonly surfaceId: string
   readonly startPoint: Point2
+  readonly groupId?: string
   lastPoint: Point2
   moved: boolean
 }
@@ -230,6 +262,7 @@ export function App({
   const [renderMode, setRenderMode] = useState<RenderMode>(initialRenderMode)
   const [showGrid, setShowGrid] = useState(initialShowGrid)
   const [activeTool, setActiveTool] = useState<ToolId>('select')
+  const [surfaceGestureActive, setSurfaceGestureActive] = useState(false)
   const [obstaclesBySurface, setObstaclesBySurface] = useState<ObstacleMap>(() => EMPTY_OBSTACLES)
   const [draftObstacle, setDraftObstacle] = useState<RectangularObstacle | null>(null)
   const [draftObstacleSurfaceId, setDraftObstacleSurfaceId] = useState<string | null>(null)
@@ -248,6 +281,16 @@ export function App({
   const [draggingPlacementIds, setDraggingPlacementIds] = useState<readonly string[]>([])
   const [dragStartPoint, setDragStartPoint] = useState<Point2 | null>(null)
   const [dragPoint, setDragPoint] = useState<Point2 | null>(null)
+
+  const clearSurfaceBox = useCallback((): void => {
+    activeSurfaceBox.current = null
+    setSurfaceGestureActive(false)
+  }, [])
+
+  const changeTool = useCallback((next: ToolId): void => {
+    if (next !== 'select') clearSurfaceBox()
+    setActiveTool(next)
+  }, [clearSurfaceBox])
 
   const source = controlledSource !== undefined ? controlledSource : localSource
 
@@ -273,9 +316,9 @@ export function App({
     replaceObstacleMap(EMPTY_OBSTACLES)
     setDraftObstacle(null)
     setDraftObstacleSurfaceId(null)
-    setActiveTool('select')
+    changeTool('select')
     store.replaceContext({ panels: store.context.panels ?? [], surfaces: [], obstacles: EMPTY_OBSTACLES })
-  }, [controlledSource, replaceObstacleMap, store])
+  }, [changeTool, controlledSource, replaceObstacleMap, store])
 
   const panelSpecs = useMemo<readonly PanelSpec[]>(
     () => Object.freeze([...PANEL_CATALOG, ...customPanels]),
@@ -286,6 +329,36 @@ export function App({
   const definitions = store.context.panels ?? []
   const placements = useMemo(() => placementValues(placementState), [placementState])
   const activeSurface = selectedSurfaceFor(surfaces, placementState)
+  const surfaceEdgeOverrides = store.context.gutters
+  const surfaceEdges: Readonly<Record<string, SurfaceEdge | null>> = Object.fromEntries(surfaces.flatMap((surface): readonly (readonly [string, SurfaceEdge | null])[] => {
+    const edge = store.getSurfaceEdge(surface.id)
+    if (edge !== undefined) {
+      return [[surface.id, {
+        surfaceId: surface.id,
+        type: edge.type ?? 'gutter',
+        direction: { ...edge.direction },
+        ...(edge.line === undefined ? {} : {
+          line: {
+            origin: { ...edge.line.origin },
+            direction: { ...edge.line.direction },
+          },
+        }),
+        ...(edge.side === undefined ? {} : { side: edge.side }),
+      }]]
+    }
+    const explicitlyCleared = isSurfaceEdgeOverrideMap(surfaceEdgeOverrides)
+      && surfaceEdgeOverrides[surface.id] === null
+    return explicitlyCleared ? [[surface.id, null]] : []
+  }))
+  const editableGroupId = useMemo(() => editableGroupIdFor(placementState), [placementState])
+  const editableGroupSettings = editableGroupId === undefined ? undefined : placementState.groupSettings[editableGroupId]
+  const editableSettings = useMemo(
+    () => editableGroupId === undefined
+      ? placementState.settings
+      : editableGroupSettings ?? store.getGroupSettings(editableGroupId),
+    [editableGroupId, editableGroupSettings, placementState.settings, store],
+  )
+  const settingsScopeLabel = editableGroupId === undefined ? 'Global defaults' : `Group ${editableGroupId}`
   const activeObstacles = activeSurface === undefined
     ? EMPTY_OBSTACLE_LIST
     : obstaclesBySurface[activeSurface.id] ?? EMPTY_OBSTACLE_LIST
@@ -302,6 +375,7 @@ export function App({
     surfacesRef.current = frozen
     setSurfaces(frozen)
     activeObstacleDrag.current = null
+    clearSurfaceBox()
     replaceObstacleMap(EMPTY_OBSTACLES)
     setDraftObstacle(null)
     setDraftObstacleSurfaceId(null)
@@ -309,12 +383,22 @@ export function App({
     // panel before the viewer has emitted its surfaces. Preserve that pending
     // placement tool while there was no previous topology to invalidate; an
     // existing topology replacement still resets to select.
-    if (hadSurfaceTopology) setActiveTool('select')
+    if (hadSurfaceTopology) changeTool('select')
     const contextPanels = store.context.panels ?? []
-    store.replaceContext({ panels: contextPanels, surfaces: frozen, obstacles: EMPTY_OBSTACLES })
+    const surfaceIds = new Set(frozen.map((surface) => surface.id))
+    const currentGutters = store.context.gutters
+    const retainedGutters = isSurfaceEdgeOverrideMap(currentGutters)
+      ? Object.fromEntries(Object.entries(currentGutters).filter(([surfaceId]) => surfaceIds.has(surfaceId)))
+      : currentGutters?.filter((gutter) => surfaceIds.has(gutter.surfaceId))
+    store.replaceContext({
+      panels: contextPanels,
+      surfaces: frozen,
+      obstacles: EMPTY_OBSTACLES,
+      ...(retainedGutters === undefined ? {} : { gutters: retainedGutters }),
+    })
     const firstSurface = frozen[0]
     if (firstSurface !== undefined) store.setActiveSurface(firstSurface.id)
-  }, [replaceObstacleMap, store])
+  }, [changeTool, clearSurfaceBox, replaceObstacleMap, store])
 
   const handleModelLoaded = useCallback((metadata: ViewerModelMetadata): void => {
     setModelMetadata(metadata)
@@ -332,20 +416,21 @@ export function App({
     surfacesRef.current = []
     setSurfaces([])
     activeObstacleDrag.current = null
+    clearSurfaceBox()
     replaceObstacleMap(EMPTY_OBSTACLES)
     setDraftObstacle(null)
     setDraftObstacleSurfaceId(null)
-    setActiveTool('select')
+    changeTool('select')
     store.replaceContext({ panels: store.context.panels ?? [], surfaces: [], obstacles: EMPTY_OBSTACLES })
-  }, [replaceObstacleMap, store])
+  }, [changeTool, clearSurfaceBox, replaceObstacleMap, store])
 
   const choosePanel = useCallback((panel: PanelSpec | null): void => {
     setSelectedPanelId(panel?.id ?? null)
     if (panel === null) {
-      setActiveTool('select')
+      changeTool('select')
       store.cancelManualPlacement()
     }
-  }, [store])
+  }, [changeTool, store])
 
   const registerAndArmPanel = useCallback((panel: PanelSpec): void => {
     const definition = toPanelDefinition(panel)
@@ -353,13 +438,13 @@ export function App({
     setSelectedPanelId(panel.id)
     const surface = selectedSurfaceFor(surfaces, store.getSnapshot()) ?? surfaces[0]
     if (surface === undefined) {
-      setActiveTool('place')
+      changeTool('place')
       return
     }
     store.setActiveSurface(surface.id)
-    store.beginManualPlacement({ panelId: panel.id, surfaceId: surface.id })
-    setActiveTool('place')
-  }, [store, surfaces])
+    store.beginManualPlacement({ panelId: panel.id, surfaceId: surface.id, ...(editableGroupId === undefined ? {} : { groupId: editableGroupId }) })
+    changeTool('place')
+  }, [changeTool, editableGroupId, store, surfaces])
 
   const handleSurfaceSelect = useCallback((selection: SurfaceSelection | null, event?: ViewerSurfaceSelectEvent): void => {
     if (selection === null) {
@@ -378,18 +463,18 @@ export function App({
 
   const handleObstacleStart = useCallback((): void => {
     activeSurfaceDrag.current = null
-    activeSurfaceBox.current = null
+    clearSurfaceBox()
     store.cancelManualPlacement()
     store.cancelArrayDrag()
     store.cancelAutoFill()
     clearObstacleDraft()
-    setActiveTool('obstacle')
-  }, [clearObstacleDraft, store])
+    changeTool('obstacle')
+  }, [changeTool, clearObstacleDraft, clearSurfaceBox, store])
 
   const handleObstacleCancel = useCallback((): void => {
     clearObstacleDraft()
-    setActiveTool('select')
-  }, [clearObstacleDraft])
+    changeTool('select')
+  }, [changeTool, clearObstacleDraft])
 
   const handleObstacleRemove = useCallback((id: string): void => {
     const current = obstaclesBySurfaceRef.current
@@ -416,9 +501,7 @@ export function App({
       store.cancelArrayDrag()
       store.cancelAutoFill()
     }
-    if (activeTool !== 'select' && activeSurfaceBox.current !== null) {
-      activeSurfaceBox.current = null
-    }
+    if (activeTool !== 'select' && (activeSurfaceBox.current !== null || surfaceGestureActive)) clearSurfaceBox()
     if (activeTool !== 'obstacle' && activeObstacleDrag.current !== null) clearObstacleDraft()
 
     if (activeTool === 'obstacle') {
@@ -475,11 +558,11 @@ export function App({
       if (event.phase === 'move' && active === null && event.buttons === 0 && event.selection !== null) {
         const surfaceId = event.selection.surface.id
         const draft = store.getSnapshot().manualPlacement
-        if (draft === undefined || draft.panelId !== activePanel.id || draft.surfaceId !== surfaceId) {
+        if (draft === undefined || draft.panelId !== activePanel.id || draft.surfaceId !== surfaceId || draft.groupId !== editableGroupId) {
           store.cancelManualPlacement()
           store.cancelArrayDrag()
           store.cancelAutoFill()
-          store.beginManualPlacement({ panelId: activePanel.id, surfaceId })
+          store.beginManualPlacement({ panelId: activePanel.id, surfaceId, ...(editableGroupId === undefined ? {} : { groupId: editableGroupId }) })
         }
         store.setActiveSurface(surfaceId)
         store.updateManualPlacement(event.selection.hitLocal, surfaceId)
@@ -492,6 +575,7 @@ export function App({
           panelId: activePanel.id,
           surfaceId: event.selection.surface.id,
           startPoint: event.selection.hitLocal,
+          ...(editableGroupId === undefined ? {} : { groupId: editableGroupId }),
           lastPoint: event.selection.hitLocal,
           moved: false,
         }
@@ -499,7 +583,7 @@ export function App({
         store.cancelAutoFill()
         store.cancelManualPlacement()
         store.setActiveSurface(event.selection.surface.id)
-        store.beginManualPlacement({ panelId: activePanel.id, surfaceId: event.selection.surface.id })
+        store.beginManualPlacement({ panelId: activePanel.id, surfaceId: event.selection.surface.id, ...(editableGroupId === undefined ? {} : { groupId: editableGroupId }) })
         store.updateManualPlacement(event.selection.hitLocal, event.selection.surface.id)
         return
       }
@@ -509,7 +593,7 @@ export function App({
         if (!active.moved && pointsDiffer(active.startPoint, event.selection.hitLocal)) {
           active.moved = true
           store.cancelManualPlacement()
-          store.beginArrayDrag(active.panelId, active.surfaceId, active.startPoint, store.getSnapshot().settings.orientation)
+          store.beginArrayDrag(active.panelId, active.surfaceId, active.startPoint, editableSettings.orientation, active.groupId)
         }
         if (active.moved) {
           store.updateArrayDrag(event.selection.hitLocal)
@@ -517,8 +601,9 @@ export function App({
             panelId: active.panelId,
             surfaceId: active.surfaceId,
             region: regionFromPoints(active.startPoint, event.selection.hitLocal),
-            settings: store.getSnapshot().settings,
+            settings: editableSettings,
             obstacles: obstaclesBySurface[active.surfaceId] ?? EMPTY_OBSTACLE_LIST,
+            ...(active.groupId === undefined ? {} : { groupId: active.groupId }),
           })
         } else {
           store.updateManualPlacement(event.selection.hitLocal, active.surfaceId)
@@ -544,19 +629,19 @@ export function App({
         // placement was actually committed; otherwise the ghost becomes a
         // permanent `Dragging 1` draft with no tool able to finish it.
         const committed = store.commitManualPlacement(finalPoint)
-        if (committed !== undefined) setActiveTool('select')
+        if (committed !== undefined) changeTool('select')
       } else {
         store.cancelManualPlacement()
-        setActiveTool('select')
+        changeTool('select')
       }
-      if (active.moved) setActiveTool('select')
+      if (active.moved) changeTool('select')
       return
     }
 
     if (activeTool !== 'select') return
     const box = activeSurfaceBox.current
     if (event.phase === 'down') {
-      if (event.selection === null) return
+      if (event.selection === null || event.button !== 0 || event.pointerType === 'touch') return
       activeSurfaceBox.current = {
         pointerId: event.pointerId,
         surfaceId: event.selection.surface.id,
@@ -565,6 +650,7 @@ export function App({
         moved: false,
         additive: event.shiftKey,
       }
+      setSurfaceGestureActive(true)
       return
     }
     if (box === null || box.pointerId !== event.pointerId) return
@@ -576,18 +662,30 @@ export function App({
     const finalPoint = event.selection !== null && event.selection.surface.id === box.surfaceId
       ? event.selection.hitLocal
       : box.lastPoint
-    activeSurfaceBox.current = null
+    clearSurfaceBox()
     if (event.phase === 'up' && box.moved) {
-      store.selectByBox(regionFromPoints(box.startPoint, finalPoint), box.surfaceId, box.additive)
+      const polygon = event.surfaceBox?.surfaceId === box.surfaceId ? event.surfaceBox.corners : undefined
+      if (polygon !== undefined) {
+        store.selectByPolygon(polygon, box.surfaceId, box.additive)
+      } else {
+        store.selectByBox(regionFromPoints(box.startPoint, finalPoint), box.surfaceId, box.additive)
+      }
       store.setActiveSurface(box.surfaceId)
     }
-  }, [activeTool, clearObstacleDraft, obstaclesBySurface, panelSpecs, replaceObstacleMap, selectedPanelId, store])
+  }, [activeTool, changeTool, clearObstacleDraft, clearSurfaceBox, editableGroupId, editableSettings, obstaclesBySurface, panelSpecs, replaceObstacleMap, selectedPanelId, store, surfaceGestureActive])
 
   const pointerSurface = useCallback((placement: PanelPlacement): SurfaceDescriptor | undefined =>
     surfaces.find((surface) => surface.id === placement.surfaceId), [surfaces])
 
   const handlePanelSelect = useCallback((placement: PanelPlacement, info: PanelPointerInfo): void => {
-    store.selectPanels([placement.id], info.shiftKey)
+    // PanelBatch reports selection before drag-start. Keep an existing
+    // multi-selection intact when the pointer starts on one of its panels so
+    // dragging that panel moves the complete group; a click on an unselected
+    // panel (or an explicit Shift gesture) still applies normal selection.
+    const selected = store.getSnapshot().selectedIds
+    if (info.shiftKey || !selected.includes(placement.id)) {
+      store.selectPanels([placement.id], info.shiftKey)
+    }
     store.setActiveSurface(placement.surfaceId)
   }, [store])
   const handlePanelDragStart = useCallback((placement: PanelPlacement, info: PanelPointerInfo): void => {
@@ -666,8 +764,13 @@ export function App({
   }, [store])
 
   const handleSettings = useCallback((patch: Partial<PlacementState['settings']>): void => {
-    store.setSettings(patch)
-  }, [store])
+    if (editableGroupId === undefined) store.setSettings(patch)
+    else store.setGroupSettings(editableGroupId, patch)
+  }, [editableGroupId, store])
+  const handleSurfaceEdgeChange = useCallback((edge: SurfaceEdgeMetadata | undefined): void => {
+    if (activeSurface === undefined) return
+    store.setSurfaceEdge(activeSurface.id, edge)
+  }, [activeSurface, store])
   const handleDelete = useCallback((ids: readonly string[]): void => { store.deletePanels(ids) }, [store])
   const handleUndo = useCallback((): void => { store.undo() }, [store])
   const handleRedo = useCallback((): void => { store.redo() }, [store])
@@ -680,19 +783,20 @@ export function App({
       panelId: selectedPanel.id,
       surfaceId: activeSurface.id,
       region: activeSurface.region,
-      settings: store.getSnapshot().settings,
+      settings: editableSettings,
       obstacles: activeObstacles,
+      ...(editableGroupId === undefined ? {} : { groupId: editableGroupId }),
     })
-    if (preview !== undefined) setActiveTool('autofill')
-  }, [activeObstacles, activeSurface, autoFillReady, selectedPanel, store])
+    if (preview !== undefined) changeTool('autofill')
+  }, [activeObstacles, activeSurface, autoFillReady, changeTool, editableGroupId, editableSettings, selectedPanel, store])
   const confirmAutoFill = useCallback((): void => {
     store.confirmAutoFill()
-    setActiveTool('select')
-  }, [store])
+    changeTool('select')
+  }, [changeTool, store])
   const cancelAutoFill = useCallback((): void => {
     store.cancelAutoFill()
-    setActiveTool('select')
-  }, [store])
+    changeTool('select')
+  }, [changeTool, store])
 
   const canAlign = placementState.selectedIds.length >= 2
   const handleAlignStart = useCallback((): void => {
@@ -700,18 +804,18 @@ export function App({
     const anchorId = placementState.selectedIds[0]
     store.setAlignMode(true, anchorId)
     if (anchorId !== undefined) store.previewAlign(anchorId)
-    setActiveTool('align')
-  }, [canAlign, placementState.selectedIds, store])
+    changeTool('align')
+  }, [canAlign, changeTool, placementState.selectedIds, store])
   const handleAlignConfirm = useCallback((): void => {
     store.confirmAlign()
     store.setAlignMode(false)
-    setActiveTool('select')
-  }, [store])
+    changeTool('select')
+  }, [changeTool, store])
   const handleAlignCancel = useCallback((): void => {
     store.cancelAlign()
     store.setAlignMode(false)
-    setActiveTool('select')
-  }, [store])
+    changeTool('select')
+  }, [changeTool, store])
 
   const manualGhost = useMemo<readonly PanelPlacement[]>(() => {
     const draft = placementState.manualPlacement
@@ -768,12 +872,16 @@ export function App({
     ?? importNotice
     ?? undefined
   const selectedShellSurface: ShellSurface | null = activeSurface === undefined ? null : toShellSurface(activeSurface)
+  const selectedShellSurfaceEdge: ShellSurfaceEdge | null = activeSurface === undefined
+    ? null
+    : store.surfaceEdgeSummary(activeSurface.id) ?? null
   const selectedShellPanel: ShellPanel | null = selectedPanel === null ? null : toShellPanel(selectedPanel)
 
   const sceneContent = (
     <PanelLayer
       panelDefinitions={definitions}
       surfaces={surfaces}
+      surfaceEdges={surfaceEdges}
       placements={renderPlacements}
       panelVisuals={panelVisuals}
       selectedIds={placementState.selectedIds}
@@ -812,6 +920,7 @@ export function App({
           renderMode={renderMode}
           onRenderModeChange={setRenderMode}
           surfaceInteractionMode={activeTool === 'place' ? 'place' : activeTool === 'obstacle' ? 'obstacle' : 'select'}
+          surfaceGestureActive={surfaceGestureActive}
           showGrid={showGrid}
           shadows
           sceneContent={sceneContent}
@@ -846,13 +955,16 @@ export function App({
       showGrid={showGrid}
       onShowGridChange={setShowGrid}
       activeTool={activeTool}
-      onToolChange={setActiveTool}
+      onToolChange={changeTool}
       selectedSurface={selectedShellSurface}
+      selectedSurfaceEdge={selectedShellSurfaceEdge}
+      onSurfaceEdgeChange={handleSurfaceEdgeChange}
       selectedPanel={selectedShellPanel}
       placements={placements}
       selectedPlacementIds={placementState.selectedIds}
       placementSummary={renderedSummary}
-      settings={placementState.settings}
+      settings={editableSettings}
+      settingsScopeLabel={settingsScopeLabel}
       onSettingsChange={handleSettings}
       alignStage={alignStage}
       alignPreview={alignPreview}

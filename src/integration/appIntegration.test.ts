@@ -6,6 +6,7 @@ import {
   buildViewerSourceFromFiles,
   CATALOG_PANEL_DEFINITIONS,
   createPanelVisuals,
+  formatSurfaceLabel,
   placementValues,
   summarisePlacementState,
   toShellPanel,
@@ -75,7 +76,7 @@ describe('app integration adapters', () => {
       usableArea: surface.usableArea,
       azimuthDeg: surface.azimuthDeg,
       tiltDeg: surface.tiltDeg,
-      label: surface.id,
+      label: 'Roof face · East',
     })
     expect(toShellPanel(panel)).toMatchObject({
       id: panel.id,
@@ -83,6 +84,12 @@ describe('app integration adapters', () => {
       model: panel.model,
       wattageW: (panel.wattage.min + panel.wattage.max) / 2,
     })
+  })
+
+  it('derives stable human-readable labels from surface geometry', () => {
+    expect(formatSurfaceLabel({ tiltDeg: 0, azimuthDeg: Number.NaN })).toBe('Ground plane')
+    expect(formatSurfaceLabel({ tiltDeg: 90, azimuthDeg: 180 })).toBe('Wall · South')
+    expect(formatSurfaceLabel({ tiltDeg: 32, azimuthDeg: 315 })).toBe('Roof face · North-west')
   })
 
   it('reports placement count and total kWp from the placement store', () => {

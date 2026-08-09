@@ -1,10 +1,10 @@
 import * as THREE from 'three'
 import { MTLLoader } from 'three/examples/jsm/loaders/MTLLoader.js'
 import { computeViewerMetadataAsync } from './metadata'
-import { parseObjDocumentAsync, type ObjDocumentBounds, type ParsedObjDocument } from './objParser'
+import { parseObjDocumentAsync, type ObjDocumentBounds, type ObjDocumentSourceCounts, type ParsedObjDocument } from './objParser'
 import { disposeViewerObject } from './renderMode'
 import type { LoadedViewerModel } from './internalTypes'
-import type { ViewerLoadPhase, ViewerLoadProgress, ViewerModelSource, ViewerResource } from './types'
+import type { ViewerLoadPhase, ViewerLoadProgress, ViewerModelSource, ViewerResource, ViewerSourceMetadata } from './types'
 
 export interface ViewerLoadOptions {
   readonly signal?: AbortSignal
@@ -167,28 +167,172 @@ export function resourceBaseUrl(resource: ViewerResource): string {
   }
 }
 
-interface ObjWorkerGroup {
+interface ValidatedWorkerGroup {
   readonly name: string
   readonly materialName: string | null
-  readonly indices: ArrayBuffer
-  readonly indicesLength: number
-  readonly uvIndices: ArrayBuffer
-  readonly uvIndicesLength: number
-  readonly normalIndices: ArrayBuffer
-  readonly normalIndicesLength: number
+  readonly indices: Uint32Array
+  readonly uvIndices: Int32Array
+  readonly normalIndices: Int32Array
 }
 
-interface ObjWorkerMessage {
-  readonly type: 'result' | 'error'
-  readonly positions?: ArrayBuffer
-  readonly positionsLength?: number
-  readonly texcoords?: ArrayBuffer
-  readonly texcoordsLength?: number
-  readonly normals?: ArrayBuffer
-  readonly normalsLength?: number
-  readonly bounds?: ObjDocumentBounds
-  readonly groups?: readonly ObjWorkerGroup[]
-  readonly message?: string
+interface TypedWorkerBuffer {
+  readonly buffer: ArrayBuffer
+  readonly length: number
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null
+}
+
+function validateWorkerBuffer(value: unknown, requestedLength: unknown, bytesPerElement: number): TypedWorkerBuffer | null {
+  if (!(value instanceof ArrayBuffer)) return null
+  if (value.byteLength % bytesPerElement !== 0) return null
+  const capacity = value.byteLength / bytesPerElement
+  if (requestedLength === undefined) return { buffer: value, length: capacity }
+  if (typeof requestedLength !== 'number' || !Number.isSafeInteger(requestedLength) || requestedLength < 0 || requestedLength > capacity) return null
+  return { buffer: value, length: requestedLength }
+}
+
+function validateWorkerBounds(value: unknown): ObjDocumentBounds | null {
+  if (!isRecord(value) || !isRecord(value.min) || !isRecord(value.max)) return null
+  const min = value.min
+  const max = value.max
+  if (![min.x, min.y, min.z, max.x, max.y, max.z].every((entry) => typeof entry === 'number' && Number.isFinite(entry))) return null
+  return {
+    min: { x: min.x as number, y: min.y as number, z: min.z as number },
+    max: { x: max.x as number, y: max.y as number, z: max.z as number },
+  }
+}
+
+function validateWorkerSourceCounts(value: unknown): ObjDocumentSourceCounts | null {
+  if (!isRecord(value)) return null
+  const fields = [value.vertexCount, value.texcoordCount, value.normalCount, value.polygonCount, value.cornerCount]
+  if (!fields.every((entry) => typeof entry === 'number' && Number.isSafeInteger(entry) && entry >= 0)) return null
+  return {
+    vertexCount: value.vertexCount as number,
+    texcoordCount: value.texcoordCount as number,
+    normalCount: value.normalCount as number,
+    polygonCount: value.polygonCount as number,
+    cornerCount: value.cornerCount as number,
+  }
+}
+
+function sourceCountsFromWorkerStreams(
+  positionsLength: number,
+  texcoordsLength: number,
+  normalsLength: number,
+  groups: readonly ValidatedWorkerGroup[],
+): ObjDocumentSourceCounts {
+  let cornerCount = 0
+  let polygonCount = 0
+  for (const group of groups) {
+    cornerCount += group.indices.length
+    polygonCount += Math.floor(group.indices.length / 3)
+  }
+  return {
+    vertexCount: Math.floor(positionsLength / 3),
+    texcoordCount: Math.floor(texcoordsLength / 2),
+    normalCount: Math.floor(normalsLength / 3),
+    polygonCount,
+    cornerCount,
+  }
+}
+
+function sourceCountsForParsed(parsed: ParsedObjDocument): ObjDocumentSourceCounts {
+  return parsed.sourceCounts ?? sourceCountsFromWorkerStreams(parsed.positions.length, parsed.texcoords.length, parsed.normals.length, parsed.groups)
+}
+
+function zeroObjBounds(): ObjDocumentBounds {
+  return { min: { x: 0, y: 0, z: 0 }, max: { x: 0, y: 0, z: 0 } }
+}
+
+function boundsFromPositions(positions: Float32Array): ObjDocumentBounds {
+  let minX = Number.POSITIVE_INFINITY
+  let minY = Number.POSITIVE_INFINITY
+  let minZ = Number.POSITIVE_INFINITY
+  let maxX = Number.NEGATIVE_INFINITY
+  let maxY = Number.NEGATIVE_INFINITY
+  let maxZ = Number.NEGATIVE_INFINITY
+  for (let offset = 0; offset + 2 < positions.length; offset += 3) {
+    const x = positions[offset] ?? 0
+    const y = positions[offset + 1] ?? 0
+    const z = positions[offset + 2] ?? 0
+    if (![x, y, z].every((value) => Number.isFinite(value))) continue
+    minX = Math.min(minX, x)
+    minY = Math.min(minY, y)
+    minZ = Math.min(minZ, z)
+    maxX = Math.max(maxX, x)
+    maxY = Math.max(maxY, y)
+    maxZ = Math.max(maxZ, z)
+  }
+  return Number.isFinite(minX) && Number.isFinite(maxX)
+    ? { min: { x: minX, y: minY, z: minZ }, max: { x: maxX, y: maxY, z: maxZ } }
+    : zeroObjBounds()
+}
+
+function boundsFromReferencedPositions(positions: Float32Array, groups: readonly ValidatedWorkerGroup[]): ObjDocumentBounds {
+  let minX = Number.POSITIVE_INFINITY
+  let minY = Number.POSITIVE_INFINITY
+  let minZ = Number.POSITIVE_INFINITY
+  let maxX = Number.NEGATIVE_INFINITY
+  let maxY = Number.NEGATIVE_INFINITY
+  let maxZ = Number.NEGATIVE_INFINITY
+  for (const group of groups) {
+    for (const positionIndex of group.indices) {
+      const offset = positionIndex * 3
+      const x = positions[offset] ?? 0
+      const y = positions[offset + 1] ?? 0
+      const z = positions[offset + 2] ?? 0
+      if (![x, y, z].every((value) => Number.isFinite(value))) continue
+      minX = Math.min(minX, x)
+      minY = Math.min(minY, y)
+      minZ = Math.min(minZ, z)
+      maxX = Math.max(maxX, x)
+      maxY = Math.max(maxY, y)
+      maxZ = Math.max(maxZ, z)
+    }
+  }
+  return Number.isFinite(minX) && Number.isFinite(maxX)
+    ? { min: { x: minX, y: minY, z: minZ }, max: { x: maxX, y: maxY, z: maxZ } }
+    : zeroObjBounds()
+}
+
+function workerGroupsReferenceValidPositions(groups: readonly ValidatedWorkerGroup[], positionsLength: number): boolean {
+  const vertexCount = Math.floor(positionsLength / 3)
+  for (const group of groups) {
+    for (const positionIndex of group.indices) {
+      if (positionIndex >= vertexCount) return false
+    }
+  }
+  return true
+}
+
+function sourceMetadataForParsed(parsed: ParsedObjDocument): ViewerSourceMetadata {
+  const { min, max } = parsed.bounds
+  const referenced = parsed.referencedBounds ?? parsed.bounds
+  const sourceCounts = sourceCountsForParsed(parsed)
+  return {
+    vertexCount: sourceCounts.vertexCount,
+    polygonCount: sourceCounts.polygonCount,
+    bounds: {
+      min,
+      max,
+      size: {
+        x: max.x - min.x,
+        y: max.y - min.y,
+        z: max.z - min.z,
+      },
+    },
+    renderedBounds: {
+      min: referenced.min,
+      max: referenced.max,
+      size: {
+        x: referenced.max.x - referenced.min.x,
+        y: referenced.max.y - referenced.min.y,
+        z: referenced.max.z - referenced.min.z,
+      },
+    },
+  }
 }
 
 function parseObjOffThread(input: ArrayBuffer | string, signal?: AbortSignal): Promise<ParsedObjDocument> {
@@ -226,43 +370,83 @@ function parseObjOffThread(input: ArrayBuffer | string, signal?: AbortSignal): P
       worker.onmessage = null
       worker.onerror = null
       signal?.removeEventListener('abort', abort)
-      worker.terminate()
+      try {
+        worker.terminate()
+      } catch {
+        // A worker may already have terminated itself after posting a result.
+      }
     }
-    const finishError = (error: Error): void => {
+    const finishError = (error: unknown): void => {
       if (settled) return
       settled = true
       cleanup()
-      reject(error)
+      reject(error instanceof Error ? error : new Error(String(error)))
     }
     const abort = (): void => {
       finishError(new DOMException('Model loading was cancelled', 'AbortError'))
     }
-    worker.onmessage = (event: MessageEvent<ObjWorkerMessage>): void => {
-      const value = event.data
-      if (value.type === 'error') {
-        finishError(new Error(value.message ?? 'OBJ worker failed'))
-        return
-      }
-      if (value.positions === undefined || value.texcoords === undefined || value.normals === undefined || value.groups === undefined) {
-        finishError(new Error('OBJ worker returned an incomplete result'))
-        return
-      }
+    worker.onmessage = (event: MessageEvent<unknown>): void => {
       if (settled) return
-      settled = true
-      cleanup()
-      resolve({
-        positions: new Float32Array(value.positions, 0, value.positionsLength),
-        texcoords: new Float32Array(value.texcoords, 0, value.texcoordsLength),
-        normals: new Float32Array(value.normals, 0, value.normalsLength),
-        bounds: value.bounds ?? { min: { x: 0, y: 0, z: 0 }, max: { x: 0, y: 0, z: 0 } },
-        groups: value.groups.map((group) => ({
-          name: group.name,
-          materialName: group.materialName,
-          indices: new Uint32Array(group.indices, 0, group.indicesLength),
-          uvIndices: new Int32Array(group.uvIndices, 0, group.uvIndicesLength),
-          normalIndices: new Int32Array(group.normalIndices, 0, group.normalIndicesLength),
-        })),
-      })
+      try {
+        if (!isRecord(event.data)) {
+          throw new Error('OBJ worker returned an invalid response')
+        }
+        const value = event.data
+        if (value.type === 'error') {
+          finishError(new Error(typeof value.message === 'string' ? value.message : 'OBJ worker failed'))
+          return
+        }
+        if (value.type !== 'result') throw new Error('OBJ worker returned an invalid response type')
+        const positions = validateWorkerBuffer(value.positions, value.positionsLength, 4)
+        const texcoords = validateWorkerBuffer(value.texcoords, value.texcoordsLength, 4)
+        const normals = validateWorkerBuffer(value.normals, value.normalsLength, 4)
+        if (positions === null || texcoords === null || normals === null) throw new Error('OBJ worker returned malformed attribute buffers')
+        if (!Array.isArray(value.groups)) throw new Error('OBJ worker returned malformed groups')
+        const groups: ValidatedWorkerGroup[] = []
+        for (const rawGroup of value.groups) {
+          if (!isRecord(rawGroup)) throw new Error('OBJ worker returned a malformed group')
+          const indices = validateWorkerBuffer(rawGroup.indices, rawGroup.indicesLength, 4)
+          const uvIndices = validateWorkerBuffer(rawGroup.uvIndices, rawGroup.uvIndicesLength, 4)
+          const normalIndices = validateWorkerBuffer(rawGroup.normalIndices, rawGroup.normalIndicesLength, 4)
+          if (indices === null || uvIndices === null || normalIndices === null) throw new Error('OBJ worker returned malformed group buffers')
+          const materialName = rawGroup.materialName === undefined || rawGroup.materialName === null
+            ? null
+            : typeof rawGroup.materialName === 'string' ? rawGroup.materialName : null
+          const name = typeof rawGroup.name === 'string' ? rawGroup.name : 'default'
+          groups.push({
+            name,
+            materialName,
+            indices: new Uint32Array(indices.buffer, 0, indices.length),
+            uvIndices: new Int32Array(uvIndices.buffer, 0, uvIndices.length),
+            normalIndices: new Int32Array(normalIndices.buffer, 0, normalIndices.length),
+          })
+        }
+        if (!workerGroupsReferenceValidPositions(groups, positions.length)) throw new Error('OBJ worker returned malformed position indices')
+        const sourceCounts = value.sourceCounts === undefined
+          ? sourceCountsFromWorkerStreams(positions.length, texcoords.length, normals.length, groups)
+          : validateWorkerSourceCounts(value.sourceCounts)
+        if (sourceCounts === null) throw new Error('OBJ worker returned malformed source counts')
+        const positionValues = new Float32Array(positions.buffer, 0, positions.length)
+        const bounds = value.bounds === undefined ? boundsFromPositions(positionValues) : validateWorkerBounds(value.bounds)
+        if (bounds === null) throw new Error('OBJ worker returned malformed bounds')
+        const referencedBounds = value.referencedBounds === undefined
+          ? boundsFromReferencedPositions(positionValues, groups)
+          : validateWorkerBounds(value.referencedBounds)
+        if (referencedBounds === null) throw new Error('OBJ worker returned malformed referenced bounds')
+        settled = true
+        cleanup()
+        resolve({
+          positions: positionValues,
+          texcoords: new Float32Array(texcoords.buffer, 0, texcoords.length),
+          normals: new Float32Array(normals.buffer, 0, normals.length),
+          bounds,
+          referencedBounds,
+          sourceCounts,
+          groups,
+        })
+      } catch (error) {
+        finishError(error)
+      }
     }
     worker.onerror = (event): void => {
       finishError(new Error(event.message || 'OBJ worker failed'))
@@ -272,31 +456,90 @@ function parseObjOffThread(input: ArrayBuffer | string, signal?: AbortSignal): P
       abort()
       return
     }
-    worker.postMessage({ type: 'parse', buffer }, [buffer])
+    try {
+      worker.postMessage({ type: 'parse', buffer }, [buffer])
+    } catch (error) {
+      finishError(error)
+    }
   })
+}
+
+interface SourceMaterialOwnership {
+  readonly detachedMaterials: Set<THREE.Material>
+  readonly sharedTextures: Set<THREE.Texture>
+  disposed: boolean
+}
+
+const materialCreatorOwnership = new WeakMap<object, SourceMaterialOwnership>()
+const objectMaterialOwnership = new WeakMap<THREE.Object3D, SourceMaterialOwnership>()
+
+function materialOwnershipFor(materials: ReturnType<MTLLoader['parse']>): SourceMaterialOwnership {
+  const key = materials as unknown as object
+  const existing = materialCreatorOwnership.get(key)
+  if (existing !== undefined) return existing
+  const created: SourceMaterialOwnership = {
+    detachedMaterials: new Set(Object.values(materials.materials)),
+    sharedTextures: new Set(),
+    disposed: false,
+  }
+  materialCreatorOwnership.set(key, created)
+  return created
+}
+
+function materialTextures(material: THREE.Material): Set<THREE.Texture> {
+  const textures = new Set<THREE.Texture>()
+  const properties = material as unknown as Record<string, unknown>
+  for (const value of Object.values(properties)) {
+    if (value instanceof THREE.Texture) textures.add(value)
+  }
+  return textures
+}
+
+/** Disposes only source materials that were not retained by a rendered mesh. */
+function disposeMaterialOwnership(ownership: SourceMaterialOwnership): void {
+  if (ownership.disposed) return
+  ownership.disposed = true
+  const textures = new Set<THREE.Texture>()
+  for (const material of ownership.detachedMaterials) {
+    for (const texture of materialTextures(material)) {
+      if (!ownership.sharedTextures.has(texture)) textures.add(texture)
+    }
+    try {
+      material.dispose()
+    } catch {
+      // Cleanup must not mask the load error or prevent the remaining resources.
+    }
+  }
+  for (const texture of textures) {
+    try {
+      texture.dispose()
+    } catch {
+      // A user-provided texture implementation may throw while being released.
+    }
+  }
+  ownership.detachedMaterials.clear()
+  ownership.sharedTextures.clear()
 }
 
 function disposeMaterialCreator(materials: ReturnType<MTLLoader['parse']> | undefined): void {
   if (materials === undefined) return
-  const disposedMaterials = new Set<THREE.Material>()
-  const disposedTextures = new Set<THREE.Texture>()
-  for (const material of Object.values(materials.materials)) {
-    if (disposedMaterials.has(material)) continue
-    disposedMaterials.add(material)
-    const properties = material as unknown as Record<string, unknown>
-    for (const value of Object.values(properties)) {
-      if (value instanceof THREE.Texture && !disposedTextures.has(value)) {
-        disposedTextures.add(value)
-        value.dispose()
-      }
-    }
-    material.dispose()
-  }
+  disposeMaterialOwnership(materialOwnershipFor(materials))
+}
+
+function disposeObjectMaterials(object: THREE.Object3D): void {
+  const ownership = objectMaterialOwnership.get(object)
+  if (ownership === undefined) return
+  disposeMaterialOwnership(ownership)
+  objectMaterialOwnership.delete(object)
 }
 
 interface ViewerMaterialCreator {
   readonly materials: Readonly<Record<string, THREE.Material>>
   readonly preload: () => unknown
+}
+
+function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
+  return typeof value === 'object' && value !== null && 'then' in value && typeof value.then === 'function'
 }
 
 /** Avoid a multi-million-vertex synchronous normal pass on the UI thread. */
@@ -340,10 +583,188 @@ function flatMaterialFromImported(source: THREE.Material): THREE.MeshBasicMateri
   return flat
 }
 
+/** Small typed builders avoid allocating corner-sized JS number arrays. */
+class Float32AttributeBuilder {
+  private buffer = new Float32Array(256)
+  public length = 0
+
+  private ensure(extra: number): void {
+    const required = this.length + extra
+    if (required <= this.buffer.length) return
+    let capacity = this.buffer.length
+    while (capacity < required) capacity = Math.min(Math.max(required, capacity * 2), 0x3fffffff)
+    const next = new Float32Array(capacity)
+    next.set(this.buffer)
+    this.buffer = next
+  }
+
+  public push2(first: number, second: number): void {
+    this.ensure(2)
+    this.buffer[this.length] = first
+    this.buffer[this.length + 1] = second
+    this.length += 2
+  }
+
+  public push3(first: number, second: number, third: number): void {
+    this.ensure(3)
+    this.buffer[this.length] = first
+    this.buffer[this.length + 1] = second
+    this.buffer[this.length + 2] = third
+    this.length += 3
+  }
+
+  public toArray(): Float32Array {
+    return this.length === this.buffer.length ? this.buffer : this.buffer.slice(0, this.length)
+  }
+}
+
+class Uint32IndexBuilder {
+  private buffer = new Uint32Array(256)
+  public length = 0
+
+  private ensure(extra: number): void {
+    const required = this.length + extra
+    if (required <= this.buffer.length) return
+    let capacity = this.buffer.length
+    while (capacity < required) capacity = Math.min(Math.max(required, capacity * 2), 0x3fffffff)
+    const next = new Uint32Array(capacity)
+    next.set(this.buffer)
+    this.buffer = next
+  }
+
+  public push(value: number): void {
+    this.ensure(1)
+    this.buffer[this.length] = value
+    this.length += 1
+  }
+
+  public toArray(): Uint32Array {
+    return this.length === this.buffer.length ? this.buffer : this.buffer.slice(0, this.length)
+  }
+}
+
+interface IndexedTupleGeometry {
+  readonly positions: Float32Array
+  readonly indices: Uint32Array
+  readonly uvs?: Float32Array
+  readonly normals?: Float32Array
+  readonly missingNormal: boolean
+}
+
+/**
+ * Builds one indexed vertex for each distinct OBJ position/UV/normal tuple.
+ * OBJ streams have independent indices, so position indices alone are not
+ * sufficient to share a Three.js vertex without changing seams. The tuple key
+ * uses source indices (rather than rounded attribute values) and therefore
+ * remains deterministic even when two source records happen to have equal
+ * values.
+ */
+function buildIndexedTupleGeometry(
+  parsed: ParsedObjDocument,
+  group: ParsedObjDocument['groups'][number],
+  hasUv: boolean,
+  hasNormal: boolean,
+): IndexedTupleGeometry {
+  const positions = new Float32AttributeBuilder()
+  const uvs = hasUv ? new Float32AttributeBuilder() : undefined
+  const normals = hasNormal ? new Float32AttributeBuilder() : undefined
+  const indices = new Uint32IndexBuilder()
+  const tupleToVertex = new Map<string, number>()
+  const missingNormalVertices = new Set<number>()
+  let missingNormal = false
+  for (let corner = 0; corner < group.indices.length; corner += 1) {
+    const positionIndex = group.indices[corner] ?? -1
+    const uvIndex = hasUv ? (group.uvIndices[corner] ?? -1) : -1
+    const normalIndex = hasNormal ? (group.normalIndices[corner] ?? -1) : -1
+    if (normalIndex < 0 && hasNormal) missingNormal = true
+    const key = `${String(positionIndex)}/${String(uvIndex)}/${String(normalIndex)}`
+    const cached = tupleToVertex.get(key)
+    if (cached !== undefined) {
+      indices.push(cached)
+      continue
+    }
+    const vertex = positions.length / 3
+    tupleToVertex.set(key, vertex)
+    const positionOffset = positionIndex * 3
+    positions.push3(
+      parsed.positions[positionOffset] ?? 0,
+      parsed.positions[positionOffset + 1] ?? 0,
+      parsed.positions[positionOffset + 2] ?? 0,
+    )
+    if (uvs !== undefined) {
+      const uvOffset = uvIndex * 2
+      uvs.push2(parsed.texcoords[uvOffset] ?? 0, parsed.texcoords[uvOffset + 1] ?? 0)
+    }
+    if (normals !== undefined) {
+      const normalOffset = normalIndex * 3
+      if (normalIndex >= 0) normals.push3(parsed.normals[normalOffset] ?? 0, parsed.normals[normalOffset + 1] ?? 0, parsed.normals[normalOffset + 2] ?? 0)
+      else {
+        normals.push3(0, 1, 0)
+        missingNormalVertices.add(vertex)
+      }
+    }
+    indices.push(vertex)
+  }
+  const positionArray = positions.toArray()
+  const indexArray = indices.toArray()
+  const normalArray = normals?.toArray()
+  if (normalArray !== undefined && missingNormalVertices.size > 0) {
+    const sums = new Float32Array(normalArray.length)
+    const addFaceNormal = (vertex: number, normalX: number, normalY: number, normalZ: number): void => {
+      if (!missingNormalVertices.has(vertex)) return
+      const offset = vertex * 3
+      sums[offset] = (sums[offset] ?? 0) + normalX
+      sums[offset + 1] = (sums[offset + 1] ?? 0) + normalY
+      sums[offset + 2] = (sums[offset + 2] ?? 0) + normalZ
+    }
+    for (let corner = 0; corner + 2 < indexArray.length; corner += 3) {
+      const first = (indexArray[corner] ?? 0) * 3
+      const second = (indexArray[corner + 1] ?? 0) * 3
+      const third = (indexArray[corner + 2] ?? 0) * 3
+      const ax = (positionArray[second] ?? 0) - (positionArray[first] ?? 0)
+      const ay = (positionArray[second + 1] ?? 0) - (positionArray[first + 1] ?? 0)
+      const az = (positionArray[second + 2] ?? 0) - (positionArray[first + 2] ?? 0)
+      const bx = (positionArray[third] ?? 0) - (positionArray[first] ?? 0)
+      const by = (positionArray[third + 1] ?? 0) - (positionArray[first + 1] ?? 0)
+      const bz = (positionArray[third + 2] ?? 0) - (positionArray[first + 2] ?? 0)
+      const normalX = ay * bz - az * by
+      const normalY = az * bx - ax * bz
+      const normalZ = ax * by - ay * bx
+      addFaceNormal(indexArray[corner] ?? 0, normalX, normalY, normalZ)
+      addFaceNormal(indexArray[corner + 1] ?? 0, normalX, normalY, normalZ)
+      addFaceNormal(indexArray[corner + 2] ?? 0, normalX, normalY, normalZ)
+    }
+    for (const vertex of missingNormalVertices) {
+      const offset = vertex * 3
+      const length = Math.hypot(sums[offset] ?? 0, sums[offset + 1] ?? 0, sums[offset + 2] ?? 0)
+      if (length > Number.EPSILON) {
+        normalArray[offset] = (sums[offset] ?? 0) / length
+        normalArray[offset + 1] = (sums[offset + 1] ?? 0) / length
+        normalArray[offset + 2] = (sums[offset + 2] ?? 0) / length
+      } else {
+        normalArray[offset] = 0
+        normalArray[offset + 1] = 1
+        normalArray[offset + 2] = 0
+      }
+    }
+  }
+  return {
+    positions: positionArray,
+    indices: indexArray,
+    ...(uvs === undefined ? {} : { uvs: uvs.toArray() }),
+    ...(normalArray === undefined ? {} : { normals: normalArray }),
+    missingNormal,
+  }
+}
+
 /** Waits for MTL-managed maps before returning ownership to the viewer. */
-export async function waitForMaterialTextures(materials: ViewerMaterialCreator, manager: THREE.LoadingManager): Promise<void> {
+export async function waitForMaterialTextures(materials: ViewerMaterialCreator, manager: THREE.LoadingManager, signal?: AbortSignal): Promise<void> {
   let resolveReady: (() => void) | undefined
-  const ready = new Promise<void>((resolve) => { resolveReady = resolve })
+  let rejectReady: ((error: unknown) => void) | undefined
+  const ready = new Promise<void>((resolve, reject) => {
+    resolveReady = resolve
+    rejectReady = reject
+  })
   const previousStart = manager.onStart
   const previousLoad = manager.onLoad
   const previousItemStart = manager.itemStart
@@ -356,8 +777,11 @@ export async function waitForMaterialTextures(materials: ViewerMaterialCreator, 
   const onLoad = (): void => {
     if (lifecycle.completed) return
     lifecycle.completed = true
-    if (typeof previousLoad === 'function') previousLoad()
-    resolveReady?.()
+    try {
+      if (typeof previousLoad === 'function') previousLoad()
+    } finally {
+      resolveReady?.()
+    }
   }
   const itemStart = (url: string): void => {
     lifecycle.started = true
@@ -371,23 +795,39 @@ export async function waitForMaterialTextures(materials: ViewerMaterialCreator, 
   const itemError = (url: string): void => {
     previousItemError.call(manager, url)
   }
+  const abort = (): void => {
+    rejectReady?.(new DOMException('Model loading was cancelled', 'AbortError'))
+  }
   manager.onStart = onStart
   manager.onLoad = onLoad
   manager.itemStart = itemStart
   manager.itemEnd = itemEnd
   manager.itemError = itemError
+  signal?.addEventListener('abort', abort, { once: true })
   try {
-    materials.preload()
+    if (signal?.aborted) {
+      abort()
+      await ready
+      return
+    }
+    const preloadResult = materials.preload()
+    const preloadDone = isPromiseLike(preloadResult) ? Promise.resolve(preloadResult) : undefined
     // LoadingManager does not expose its pending count. The wrappers above
     // let us distinguish an asynchronous texture lifecycle from a creator
     // whose materials were already populated (or have no maps at all).
     if (!lifecycle.started && lifecycle.pending === 0) {
-      await new Promise<void>((resolve) => { setTimeout(resolve, 0) })
+      if (preloadDone === undefined) {
+        await new Promise<void>((resolve) => { setTimeout(resolve, 0) })
+      } else {
+        await Promise.race([preloadDone, ready])
+      }
       if (!lifecycle.completed) resolveReady?.()
+      await ready
     } else {
       await ready
     }
   } finally {
+    signal?.removeEventListener('abort', abort)
     if (manager.onStart === onStart) manager.onStart = previousStart
     if (manager.onLoad === onLoad) manager.onLoad = previousLoad
     if (manager.itemStart === itemStart) manager.itemStart = previousItemStart
@@ -399,6 +839,7 @@ export async function waitForMaterialTextures(materials: ViewerMaterialCreator, 
 export function buildViewerObject(parsed: ParsedObjDocument, materials: ReturnType<MTLLoader['parse']> | undefined, name: string): THREE.Group {
   const object = new THREE.Group()
   object.name = name
+  const sourceOwnership = materials === undefined ? undefined : materialOwnershipFor(materials)
   let fallbackStandard: THREE.MeshStandardMaterial | undefined
   let fallbackFlat: THREE.MeshBasicMaterial | undefined
   const materialCache = new Map<string, THREE.Material>()
@@ -426,14 +867,21 @@ export function buildViewerObject(parsed: ParsedObjDocument, materials: ReturnTy
     }
     const existing = materials.materials[materialName]
     const material = existing ?? materials.create(materialName)
+    sourceOwnership?.detachedMaterials.add(material)
     // Photogrammetry OBJ winding is not reliable. Keep imported surfaces
     // visible and raycastable from above regardless of winding direction.
     material.side = THREE.DoubleSide
     if (!preferFlat) {
+      for (const texture of materialTextures(material)) sourceOwnership?.sharedTextures.add(texture)
+      sourceOwnership?.detachedMaterials.delete(material)
       materialCache.set(materialName, material)
       return material
     }
     const flat = flatMaterialFromImported(material)
+    // Only maps carried by the unlit clone remain attached to the rendered
+    // object. Other source maps (normal/roughness/env/etc.) stay detached so
+    // their GPU resources are released by the source-material owner.
+    for (const texture of materialTextures(flat)) sourceOwnership?.sharedTextures.add(texture)
     flatMaterialCache.set(materialName, flat)
     return flat
   }
@@ -454,43 +902,15 @@ export function buildViewerObject(parsed: ParsedObjDocument, materials: ReturnTy
         if (indexedNormals) geometry.setAttribute('normal', new THREE.BufferAttribute(parsed.normals, 3))
         else if (faceCount <= MAX_SYNC_NORMAL_FACES) geometry.computeVertexNormals()
       } else {
-        // OBJ position, UV, and normal streams may use different indices. Expand
-        // corners when needed so each BufferGeometry attribute remains aligned.
-        const positions = new Float32Array(cornerCount * 3)
-        const uvs = hasUv ? new Float32Array(cornerCount * 2) : undefined
-        const normals = hasNormal ? new Float32Array(cornerCount * 3) : undefined
-        const missingNormal = hasNormal && group.normalIndices.some((index) => index < 0)
-        for (let corner = 0; corner < cornerCount; corner += 1) {
-          const positionIndex = group.indices[corner] ?? 0
-          const positionOffset = positionIndex * 3
-          const destinationOffset = corner * 3
-          positions[destinationOffset] = parsed.positions[positionOffset] ?? 0
-          positions[destinationOffset + 1] = parsed.positions[positionOffset + 1] ?? 0
-          positions[destinationOffset + 2] = parsed.positions[positionOffset + 2] ?? 0
-          if (uvs !== undefined) {
-            const uvIndex = group.uvIndices[corner] ?? -1
-            if (uvIndex >= 0) {
-              const uvOffset = uvIndex * 2
-              uvs[corner * 2] = parsed.texcoords[uvOffset] ?? 0
-              uvs[corner * 2 + 1] = parsed.texcoords[uvOffset + 1] ?? 0
-            }
-          }
-          if (normals !== undefined) {
-            const normalIndex = group.normalIndices[corner] ?? -1
-            if (normalIndex >= 0) {
-              const normalOffset = normalIndex * 3
-              normals[destinationOffset] = parsed.normals[normalOffset] ?? 0
-              normals[destinationOffset + 1] = parsed.normals[normalOffset + 1] ?? 0
-              normals[destinationOffset + 2] = parsed.normals[normalOffset + 2] ?? 0
-            } else {
-              normals[destinationOffset + 1] = 1
-            }
-          }
-        }
-        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
-        if (uvs !== undefined) geometry.setAttribute('uv', new THREE.BufferAttribute(uvs, 2))
-        if (normals !== undefined) geometry.setAttribute('normal', new THREE.BufferAttribute(normals, 3))
-        if ((normals === undefined || missingNormal) && faceCount <= MAX_SYNC_NORMAL_FACES) geometry.computeVertexNormals()
+        // OBJ position, UV, and normal streams may use different indices. Build
+        // a deterministic indexed tuple table instead of expanding every face
+        // corner into a unique BufferGeometry vertex.
+        const tupleGeometry = buildIndexedTupleGeometry(parsed, group, hasUv, hasNormal)
+        geometry.setAttribute('position', new THREE.BufferAttribute(tupleGeometry.positions, 3))
+        geometry.setIndex(new THREE.BufferAttribute(tupleGeometry.indices, 1))
+        if (tupleGeometry.uvs !== undefined) geometry.setAttribute('uv', new THREE.BufferAttribute(tupleGeometry.uvs, 2))
+        if (tupleGeometry.normals !== undefined) geometry.setAttribute('normal', new THREE.BufferAttribute(tupleGeometry.normals, 3))
+        if (tupleGeometry.normals === undefined && faceCount <= MAX_SYNC_NORMAL_FACES) geometry.computeVertexNormals()
       }
       const mesh = new THREE.Mesh(geometry, materialFor(group.materialName, !hasNormal && faceCount > MAX_SYNC_NORMAL_FACES))
       mesh.receiveShadow = true
@@ -499,8 +919,10 @@ export function buildViewerObject(parsed: ParsedObjDocument, materials: ReturnTy
     }
   } catch (error) {
     disposeViewerObject(object)
+    if (sourceOwnership !== undefined) disposeMaterialOwnership(sourceOwnership)
     throw error
   }
+  if (sourceOwnership !== undefined) objectMaterialOwnership.set(object, sourceOwnership)
   return object
 }
 
@@ -537,7 +959,7 @@ export async function loadViewerModel(source: ViewerModelSource, options: Viewer
       const mtlLoader = new MTLLoader(manager)
       materials = mtlLoader.parse(mtlText, resourceBaseUrl(source.mtl))
       report('materials', 0.58, 2, 2)
-      await waitForMaterialTextures(materials, manager)
+      await waitForMaterialTextures(materials, manager, options.signal)
     }
 
     if (options.signal?.aborted) throw new DOMException('Model loading was cancelled', 'AbortError')
@@ -550,19 +972,33 @@ export async function loadViewerModel(source: ViewerModelSource, options: Viewer
     const dispose = (): void => {
       if (disposed) return
       disposed = true
-      disposeViewerObject(object)
-      registry.dispose()
+      try {
+        disposeViewerObject(object)
+      } finally {
+        disposeObjectMaterials(object)
+        registry.dispose()
+      }
     }
     disposeBuiltObject = dispose
     report('finalising', 0.94, 1, 1)
     if (options.signal?.aborted) throw new DOMException('Model loading was cancelled', 'AbortError')
-    options.onObjectReady?.(object, dispose, parsed.bounds)
-    const metadata = await computeViewerMetadataAsync(object, source.name ?? resourceName(source.obj, 'Site model'), false, { signal: options.signal, chunkSize: 4_096 })
+    options.onObjectReady?.(object, dispose, parsed.referencedBounds ?? parsed.bounds)
+    const metadata = await computeViewerMetadataAsync(object, source.name ?? resourceName(source.obj, 'Site model'), false, {
+      signal: options.signal,
+      chunkSize: 4_096,
+      source: sourceMetadataForParsed(parsed),
+    })
     report('complete', 1, 1, 1)
     return { object, metadata, dispose }
   } catch (error) {
     if (disposeBuiltObject !== undefined) disposeBuiltObject()
-    else if (builtObject !== undefined) disposeViewerObject(builtObject)
+    else if (builtObject !== undefined) {
+      try {
+        disposeViewerObject(builtObject)
+      } finally {
+        disposeObjectMaterials(builtObject)
+      }
+    }
     else disposeMaterialCreator(materials)
     registry.dispose()
     if (typeof DOMException !== 'undefined' && error instanceof DOMException) throw error
