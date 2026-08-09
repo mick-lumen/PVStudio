@@ -21,7 +21,7 @@ vi.mock('./viewer', () => {
     usableArea: 27,
     faceRefs: [{ meshId: 'roof', faceIndices: [0] }],
   }
-  type MockViewerProps = Pick<ViewerProps, 'source' | 'onSurfacesChange' | 'onSurfaceSelect' | 'onSurfacePointer' | 'sceneContent'>
+  type MockViewerProps = Pick<ViewerProps, 'source' | 'cameraMode' | 'onCameraModeChange' | 'renderMode' | 'onRenderModeChange' | 'onSurfacesChange' | 'onSurfaceSelect' | 'onSurfacePointer' | 'sceneContent'>
   type LayerProps = {
     readonly placements?: readonly PanelPlacement[]
     readonly interactionsEnabled?: boolean
@@ -68,6 +68,12 @@ vi.mock('./viewer', () => {
     })
     return (
     <div data-testid="mock-viewer">
+      <div role="toolbar" aria-label="Viewer display controls">
+        <button type="button" aria-pressed={props.cameraMode === 'perspective'} onClick={() => { props.onCameraModeChange?.('perspective') }}>3D</button>
+        <button type="button" aria-pressed={props.cameraMode === 'orthographic'} onClick={() => { props.onCameraModeChange?.('orthographic') }}>Top</button>
+        <button type="button" aria-pressed={props.renderMode === 'texture'} onClick={() => { props.onRenderModeChange?.('texture') }}>Texture</button>
+        <button type="button" aria-pressed={props.renderMode === 'wireframe'} onClick={() => { props.onRenderModeChange?.('wireframe') }}>Wire</button>
+      </div>
       <output data-testid="mock-source">{props.source?.name ?? ''}{props.source?.mtl === undefined ? '' : `|${resourceLabel(props.source.mtl)}`}{props.source?.textures === undefined ? '' : `|${props.source.textures.map(resourceLabel).join(',')}`}</output>
       <output data-testid="mock-placement-ids">{layer?.props.placements?.map((placement) => placement.id).join(',') ?? ''}</output>
       <output data-testid="mock-placement-centers">{layer?.props.placements?.map((placement) => `${placement.id}:${placement.localCenter.x.toFixed(2)},${placement.localCenter.y.toFixed(2)}`).join('|') ?? ''}</output>
@@ -166,6 +172,34 @@ describe('App', () => {
     render(<App webglAvailable={false} />)
     expect(screen.getByRole('heading', { name: 'PV Studio' })).toBeInTheDocument()
     expect(screen.getByRole('alert')).toHaveTextContent(/WebGL/i)
+  })
+
+  it('keeps in-canvas display controls synchronized with the shell controls', () => {
+    render(<App webglAvailable />)
+    const viewerControls = within(screen.getByRole('toolbar', { name: 'Viewer display controls' }))
+    const shellCameraControls = within(screen.getByRole('group', { name: 'Camera mode' }))
+    const shellRenderControls = within(screen.getByRole('group', { name: 'Render mode' }))
+
+    expect(viewerControls.getByRole('button', { name: '3D' })).toHaveAttribute('aria-pressed', 'true')
+    expect(viewerControls.getByRole('button', { name: 'Texture' })).toHaveAttribute('aria-pressed', 'true')
+
+    fireEvent.click(viewerControls.getByRole('button', { name: 'Top' }))
+    fireEvent.click(viewerControls.getByRole('button', { name: 'Wire' }))
+
+    expect(viewerControls.getByRole('button', { name: 'Top' })).toHaveAttribute('aria-pressed', 'true')
+    expect(viewerControls.getByRole('button', { name: 'Wire' })).toHaveAttribute('aria-pressed', 'true')
+    expect(shellCameraControls.getByRole('button', { name: '2D plan' })).toHaveAttribute('aria-pressed', 'true')
+    expect(shellRenderControls.getByRole('button', { name: 'Wire' })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByText('Top-down plan')).toBeInTheDocument()
+    expect(screen.getByText('Wireframe')).toBeInTheDocument()
+
+    fireEvent.click(shellCameraControls.getByRole('button', { name: '3D' }))
+    fireEvent.click(shellRenderControls.getByRole('button', { name: 'Texture' }))
+
+    expect(viewerControls.getByRole('button', { name: '3D' })).toHaveAttribute('aria-pressed', 'true')
+    expect(viewerControls.getByRole('button', { name: 'Texture' })).toHaveAttribute('aria-pressed', 'true')
+    expect(shellCameraControls.getByRole('button', { name: '3D' })).toHaveAttribute('aria-pressed', 'true')
+    expect(shellRenderControls.getByRole('button', { name: 'Texture' })).toHaveAttribute('aria-pressed', 'true')
   })
 
   it('announces a selected import source through the controlled shell boundary', () => {

@@ -808,7 +808,9 @@ export function App({
         <Viewer
           source={source}
           cameraMode={cameraMode === '3d' ? 'perspective' : 'orthographic'}
+          onCameraModeChange={(mode) => { setCameraMode(mode === 'perspective' ? '3d' : '2d') }}
           renderMode={renderMode}
+          onRenderModeChange={setRenderMode}
           surfaceInteractionMode={activeTool === 'place' ? 'place' : activeTool === 'obstacle' ? 'obstacle' : 'select'}
           showGrid={showGrid}
           shadows
