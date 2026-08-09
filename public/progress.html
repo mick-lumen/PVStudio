@@ -1,0 +1,679 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#09111f" />
+    <meta
+      name="description"
+      content="Live delivery status for the PV Studio design workspace."
+    />
+    <title>PV Studio · delivery status</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --canvas: #09111f;
+        --surface: #111d2d;
+        --surface-raised: #16253a;
+        --line: #263852;
+        --ink: #f1f6ff;
+        --muted: #9aabc2;
+        --quiet: #72849e;
+        --accent: #56e0a4;
+        --accent-strong: #a5f4d1;
+        --info: #7eb6ff;
+        --warning: #f6c975;
+        --shadow: 0 18px 55px rgb(0 0 0 / 18%);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html {
+        background: var(--canvas);
+      }
+
+      body {
+        margin: 0;
+        min-width: 320px;
+        color: var(--ink);
+        background:
+          radial-gradient(circle at 88% -8%, rgb(52 120 148 / 18%), transparent 34rem),
+          var(--canvas);
+        font: 15px/1.55 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+          "Segoe UI", sans-serif;
+      }
+
+      a {
+        color: var(--accent-strong);
+      }
+
+      a:focus-visible,
+      button:focus-visible {
+        outline: 3px solid var(--warning);
+        outline-offset: 3px;
+      }
+
+      .page {
+        width: min(1120px, calc(100% - 32px));
+        margin: 0 auto;
+        padding: 34px 0 56px;
+      }
+
+      .masthead {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 28px;
+        margin-bottom: 28px;
+      }
+
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        margin: 0 0 20px;
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+      }
+
+      .brand-mark {
+        display: grid;
+        width: 30px;
+        height: 30px;
+        place-items: center;
+        border: 1px solid rgb(86 224 164 / 45%);
+        border-radius: 9px;
+        color: var(--accent);
+        background: rgb(86 224 164 / 9%);
+        box-shadow: 0 0 28px rgb(86 224 164 / 11%);
+      }
+
+      .brand-mark::before {
+        width: 11px;
+        height: 11px;
+        border: 2px solid currentColor;
+        border-radius: 50%;
+        content: "";
+      }
+
+      h1,
+      h2,
+      h3,
+      p {
+        margin-top: 0;
+      }
+
+      h1 {
+        max-width: 700px;
+        margin-bottom: 12px;
+        font-size: clamp(2.1rem, 5vw, 3.65rem);
+        font-weight: 720;
+        letter-spacing: -0.055em;
+        line-height: 1.03;
+      }
+
+      .lede {
+        max-width: 700px;
+        margin-bottom: 0;
+        color: var(--muted);
+        font-size: clamp(1rem, 2vw, 1.1rem);
+      }
+
+      .live-card {
+        min-width: min(100%, 275px);
+        padding: 18px;
+        border: 1px solid rgb(86 224 164 / 35%);
+        border-radius: 16px;
+        background: linear-gradient(145deg, rgb(29 67 66 / 72%), rgb(17 29 45 / 94%));
+        box-shadow: var(--shadow);
+      }
+
+      .live-label {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 9px;
+        color: var(--accent-strong);
+        font-size: 11px;
+        font-weight: 750;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+      }
+
+      .pulse {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--accent);
+        box-shadow: 0 0 0 5px rgb(86 224 164 / 12%);
+      }
+
+      .live-card strong {
+        display: block;
+        margin-bottom: 3px;
+        font-size: 1.05rem;
+      }
+
+      .live-card small {
+        display: block;
+        color: var(--muted);
+      }
+
+      .section {
+        margin-top: 28px;
+      }
+
+      .section-heading {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 16px;
+        margin-bottom: 12px;
+      }
+
+      .section-heading h2 {
+        margin-bottom: 0;
+        font-size: 1.1rem;
+        letter-spacing: -0.02em;
+      }
+
+      .section-heading p {
+        margin-bottom: 0;
+        color: var(--quiet);
+        font-size: 13px;
+      }
+
+      .surface {
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        background: rgb(17 29 45 / 88%);
+        box-shadow: var(--shadow);
+      }
+
+      .workstreams {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 12px;
+        padding: 12px;
+      }
+
+      .workstream {
+        position: relative;
+        min-height: 175px;
+        padding: 18px;
+        overflow: hidden;
+        border: 1px solid var(--line);
+        border-radius: 13px;
+        background: var(--surface);
+      }
+
+      .workstream::after {
+        position: absolute;
+        right: -34px;
+        bottom: -42px;
+        width: 118px;
+        height: 118px;
+        border: 1px solid rgb(126 182 255 / 14%);
+        border-radius: 50%;
+        content: "";
+      }
+
+      .workstream h3 {
+        margin-bottom: 6px;
+        font-size: 1rem;
+      }
+
+      .workstream p {
+        min-height: 49px;
+        margin-bottom: 16px;
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .state {
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        padding: 4px 9px;
+        border-radius: 999px;
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+      }
+
+      .state::before {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: currentColor;
+        content: "";
+      }
+
+      .state--active {
+        color: var(--accent-strong);
+        background: rgb(86 224 164 / 12%);
+      }
+
+      .state--queued {
+        color: var(--warning);
+        background: rgb(246 201 117 / 11%);
+      }
+
+      .state--ready {
+        color: var(--info);
+        background: rgb(126 182 255 / 11%);
+      }
+
+      .roles {
+        display: grid;
+        grid-template-columns: 1.2fr 1fr 1fr;
+        overflow: hidden;
+      }
+
+      .role {
+        min-height: 150px;
+        padding: 20px;
+      }
+
+      .role + .role {
+        border-left: 1px solid var(--line);
+      }
+
+      .role h3 {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 9px;
+        font-size: 1rem;
+      }
+
+      .role h3 span {
+        color: var(--quiet);
+        font-size: 11px;
+        font-weight: 650;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      .role p {
+        margin-bottom: 12px;
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .role ul {
+        margin: 0;
+        padding: 0;
+        color: var(--muted);
+        font-size: 12px;
+        list-style: none;
+      }
+
+      .role li {
+        display: flex;
+        gap: 7px;
+        margin: 5px 0;
+      }
+
+      .role li::before {
+        flex: 0 0 auto;
+        width: 5px;
+        height: 5px;
+        margin-top: 8px;
+        border-radius: 50%;
+        background: var(--info);
+        content: "";
+      }
+
+      .gates {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 1px;
+        overflow: hidden;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: var(--line);
+      }
+
+      .gate {
+        padding: 15px 16px;
+        background: var(--surface);
+      }
+
+      .gate strong {
+        display: block;
+        margin-bottom: 3px;
+        font-size: 13px;
+      }
+
+      .gate small {
+        color: var(--quiet);
+      }
+
+      .gate-status {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        margin-top: 10px;
+        color: var(--warning);
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+      }
+
+      .gate-status::before {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: currentColor;
+        content: "";
+      }
+
+      .fixture-card {
+        display: grid;
+        gap: 16px;
+        padding: 20px;
+      }
+
+      .fixture-card h3 {
+        margin-bottom: 6px;
+        font-size: 1.05rem;
+      }
+
+      .fixture-card p {
+        margin-bottom: 0;
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .fixture-links {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin: 0;
+        padding: 0;
+        list-style: none;
+      }
+
+      .fixture-links a {
+        display: inline-flex;
+        align-items: center;
+        min-height: 32px;
+        padding: 5px 10px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--surface-raised);
+        font-size: 12px;
+        text-decoration: none;
+      }
+
+      .fixture-status {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+
+      .footer {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 18px;
+        margin-top: 27px;
+        padding-top: 18px;
+        border-top: 1px solid var(--line);
+        color: var(--quiet);
+        font-size: 12px;
+      }
+
+      .footer p {
+        margin: 0;
+      }
+
+      @media (max-width: 800px) {
+        .masthead {
+          display: block;
+        }
+
+        .live-card {
+          width: 100%;
+          margin-top: 22px;
+        }
+
+        .workstreams,
+        .gates {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+
+        .roles {
+          grid-template-columns: 1fr;
+        }
+
+        .role + .role {
+          border-top: 1px solid var(--line);
+          border-left: 0;
+        }
+      }
+
+      @media (max-width: 520px) {
+        .page {
+          width: min(100% - 22px, 1120px);
+          padding-top: 22px;
+        }
+
+        .workstreams,
+        .gates {
+          grid-template-columns: 1fr;
+        }
+
+        .section-heading {
+          display: block;
+        }
+
+        .section-heading p {
+          margin-top: 4px;
+        }
+
+        .footer {
+          display: block;
+        }
+
+        .footer p + p {
+          margin-top: 6px;
+        }
+      }
+
+      @media (prefers-reduced-motion: no-preference) {
+        .pulse {
+          animation: breathe 2.4s ease-in-out infinite;
+        }
+
+        @keyframes breathe {
+          50% {
+            box-shadow: 0 0 0 8px rgb(86 224 164 / 4%);
+          }
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="page">
+      <header class="masthead">
+        <div>
+          <p class="brand"><span class="brand-mark" aria-hidden="true"></span>PV Studio</p>
+          <h1>Delivery status, in the open.</h1>
+          <p class="lede">
+            A live snapshot of the Three.js solar-layout workspace as Luna workers build, test,
+            and critique each in-scope capability.
+          </p>
+        </div>
+        <aside class="live-card" aria-label="Current delivery state">
+          <div class="live-label"><span class="pulse" aria-hidden="true"></span>Work in progress</div>
+          <strong>Core slices are independently accepted</strong>
+            <small>App orchestration, browser evidence, and global critics remain in flight.</small>
+        </aside>
+      </header>
+
+      <section class="section" aria-labelledby="workstreams-heading">
+        <div class="section-heading">
+          <h2 id="workstreams-heading">Core workstreams</h2>
+          <p>Updated 09 Aug 2026 · Europe/Dublin</p>
+        </div>
+        <div class="surface workstreams">
+          <article class="workstream">
+            <h3>3D viewer</h3>
+            <p>WebODM OBJ/MTL loading, camera controls, and resilient surface selection.</p>
+            <span class="state state--queued">Browser render evidence pending</span>
+          </article>
+          <article class="workstream">
+            <h3>Panel chooser</h3>
+            <p>Data-driven real-module catalog, custom dimensions, and chooser interaction.</p>
+            <span class="state state--ready">Independently accepted</span>
+          </article>
+          <article class="workstream">
+            <h3>Panel placement</h3>
+            <p>Surface-snapped manual placement, arrays, settings, and auto-fill preview.</p>
+            <span class="state state--ready">Independently accepted</span>
+          </article>
+          <article class="workstream">
+            <h3>Rendering</h3>
+            <p>Panel layers, status overlays, shadows, and model-import rendering lifecycle.</p>
+            <span class="state state--ready">Independently accepted</span>
+          </article>
+          <article class="workstream">
+            <h3>Application shell</h3>
+            <p>Workspace chrome, controls, and responsive interaction framing.</p>
+            <span class="state state--ready">Independently accepted</span>
+          </article>
+          <article class="workstream">
+            <h3>App orchestration</h3>
+            <p>Connects catalog, placement store, viewer surfaces, and end-to-end actions.</p>
+            <span class="state state--active">Integration in progress</span>
+          </article>
+        </div>
+      </section>
+
+      <section class="section" aria-labelledby="fixture-heading">
+        <div class="section-heading">
+          <h2 id="fixture-heading">Checked-in browser fixture</h2>
+          <p>Evidence is local and inspectable before public deployment.</p>
+        </div>
+        <div class="surface fixture-card">
+          <div>
+            <h3>Synthetic WebODM house</h3>
+            <p>
+              A deterministic CC0 stand-in with a pitched roof, four walls, surrounding ground,
+              MTL materials, and three JPEG maps. The checked-in OBJ is exactly 25,715,444 bytes
+              with 184,791 vertices and 365,760 triangular polygons; the validator reports 7/7
+              integrity checks passed.
+            </p>
+          </div>
+          <ul class="fixture-links" aria-label="Synthetic WebODM house fixture files">
+            <li><a href="test-data/synthetic-webodm-house/synthetic-webodm-house.obj">OBJ · 25.7 MB</a></li>
+            <li><a href="test-data/synthetic-webodm-house/synthetic-webodm-house.mtl">MTL · materials</a></li>
+            <li><a href="test-data/synthetic-webodm-house/ground-texture.jpg">Ground texture · JPEG</a></li>
+            <li><a href="test-data/synthetic-webodm-house/roof-texture.jpg">Roof texture · JPEG</a></li>
+            <li><a href="test-data/synthetic-webodm-house/wall-texture.jpg">Wall texture · JPEG</a></li>
+            <li><a href="test-data/synthetic-webodm-house/README.md">README · provenance and validation</a></li>
+          </ul>
+          <div class="fixture-status" aria-label="Fixture verification status">
+            <span class="state state--ready">Local parser and integrity tests passed</span>
+            <span class="state state--queued">Public browser render evidence pending</span>
+          </div>
+          <p>
+            The workspace exposes “Try sample” to load these URLs through the production Viewer
+            path without a file picker. A deployed browser smoke check has not been claimed yet.
+          </p>
+        </div>
+      </section>
+
+      <section class="section" aria-labelledby="roles-heading">
+        <div class="section-heading">
+          <h2 id="roles-heading">Luna loop</h2>
+          <p>Every change is independently checked before sign-off.</p>
+        </div>
+        <div class="surface roles">
+          <article class="role">
+            <h3>Luna workers <span>implementation</span></h3>
+            <p>Build bounded feature slices with strict TypeScript and focused tests.</p>
+            <ul>
+              <li>Core, catalog, rendering, shell, and placement slices accepted independently</li>
+              <li>No scope beyond the three core capabilities</li>
+            </ul>
+          </article>
+          <article class="role">
+            <h3>Luna critics <span>adversarial review</span></h3>
+            <p>Inspect the running output against the OpenSolar interaction bar.</p>
+            <ul>
+              <li>Viewer responsiveness and App integration remain under review</li>
+              <li>Browser and accessibility critics still pending</li>
+            </ul>
+          </article>
+          <article class="role">
+            <h3>Luna tester <span>verification</span></h3>
+            <p>Run the complete quality gates and report reproducible failures.</p>
+            <ul>
+              <li>Tests, typecheck, lint, and production build</li>
+              <li>Final system pass follows global critic approval</li>
+            </ul>
+          </article>
+        </div>
+      </section>
+
+      <section class="section" aria-labelledby="gates-heading">
+        <div class="section-heading">
+          <h2 id="gates-heading">Quality gates</h2>
+          <p>Not signed off while any gate is pending.</p>
+        </div>
+        <div class="gates" role="list">
+          <div class="gate" role="listitem">
+            <strong>Component tests</strong>
+            <small>Vitest + Testing Library</small>
+            <div class="gate-status">Pending App integration</div>
+          </div>
+          <div class="gate" role="listitem">
+            <strong>Strict typecheck</strong>
+            <small>TypeScript project references</small>
+            <div class="gate-status">Pending App integration</div>
+          </div>
+          <div class="gate" role="listitem">
+            <strong>Lint</strong>
+            <small>ESLint strict typed rules</small>
+            <div class="gate-status">Pending App integration</div>
+          </div>
+          <div class="gate" role="listitem">
+            <strong>Production build</strong>
+            <small>Vite production output</small>
+            <div class="gate-status">Pending final gate</div>
+          </div>
+          <div class="gate" role="listitem">
+            <strong>Browser smoke</strong>
+            <small>End-to-end workspace flow</small>
+            <div class="gate-status">Pending global critic</div>
+          </div>
+          <div class="gate" role="listitem">
+            <strong>Accessibility</strong>
+            <small>Keyboard, focus, and semantic review</small>
+            <div class="gate-status">Pending global critic</div>
+          </div>
+          <div class="gate" role="listitem">
+            <strong>Final sign-off</strong>
+            <small>Cross-workstream release review</small>
+            <div class="gate-status">Pending all gates</div>
+          </div>
+        </div>
+      </section>
+
+      <footer class="footer">
+        <p>Scope: OBJ/MTL viewer · panel chooser · panel placement.</p>
+        <p><a href="/">Open the workspace</a> · status intentionally remains in progress.</p>
+      </footer>
+    </main>
+  </body>
+</html>

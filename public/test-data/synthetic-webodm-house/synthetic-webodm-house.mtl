@@ -1,0 +1,22 @@
+# PV Studio deterministic synthetic WebODM fixture
+# Materials are intentionally simple and map to local JPEG textures.
+newmtl Ground
+Ka 0.25 0.29 0.20
+Kd 0.42 0.48 0.32
+Ks 0.05 0.05 0.05
+Ns 8.0
+map_Kd ground-texture.jpg
+
+newmtl Roof
+Ka 0.18 0.20 0.22
+Kd 0.34 0.39 0.45
+Ks 0.12 0.12 0.12
+Ns 24.0
+map_Kd roof-texture.jpg
+
+newmtl Wall
+Ka 0.45 0.38 0.30
+Kd 0.72 0.61 0.46
+Ks 0.05 0.05 0.05
+Ns 8.0
+map_Kd wall-texture.jpg

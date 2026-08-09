@@ -1,0 +1,10 @@
+Creative Commons Legal Code
+
+CC0 1.0 Universal
+
+To the extent possible under law, the creator has waived all copyright and
+related rights to the synthetic PV Studio WebODM house fixture in this
+directory. You may copy, modify, distribute, and use it without permission.
+
+This dedication does not waive trademark rights in names belonging to other
+parties. The fixture is synthetic and is not an OpenDroneMap-produced model.

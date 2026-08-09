@@ -1,0 +1,170 @@
+[
+  {
+    "id": "ja-solar-jam72s30",
+    "code": "JAM72S30",
+    "manufacturer": "JA Solar",
+    "model": "JAM72S30",
+    "family": "JAM72S30",
+    "length": 2278,
+    "width": 1134,
+    "thickness": 30,
+    "weight": 27.5,
+    "wattage": { "min": 540, "max": 580 },
+    "cellCount": 144,
+    "cellType": "monocrystalline PERC",
+    "frameColor": "black",
+    "efficiency": 22.5,
+    "stcRating": {
+      "irradianceWPerM2": 1000,
+      "cellTemperatureC": 25,
+      "airMass": 1.5
+    }
+  },
+  {
+    "id": "ja-solar-jam60s10",
+    "code": "JAM60S10",
+    "manufacturer": "JA Solar",
+    "model": "JAM60S10",
+    "family": "JAM60S10",
+    "length": 1722,
+    "width": 1134,
+    "thickness": 30,
+    "weight": 19.5,
+    "wattage": { "min": 405, "max": 430 },
+    "cellCount": 120,
+    "cellType": "monocrystalline PERC",
+    "frameColor": "black",
+    "efficiency": 22.1,
+    "stcRating": {
+      "irradianceWPerM2": 1000,
+      "cellTemperatureC": 25,
+      "airMass": 1.5
+    }
+  },
+  {
+    "id": "trina-solar-tsm-neg9r-28",
+    "code": "TSM-NEG9R.28",
+    "manufacturer": "Trina Solar",
+    "model": "TSM-NEG9R.28",
+    "family": "TSM-NEG9R.28",
+    "length": 1762,
+    "width": 1134,
+    "thickness": 30,
+    "weight": 21,
+    "wattage": { "min": 430, "max": 455 },
+    "cellCount": 144,
+    "cellType": "TOPCon",
+    "frameColor": "black",
+    "efficiency": 22.8,
+    "stcRating": {
+      "irradianceWPerM2": 1000,
+      "cellTemperatureC": 25,
+      "airMass": 1.5
+    }
+  },
+  {
+    "id": "trina-solar-vertex-n",
+    "code": "Vertex N",
+    "manufacturer": "Trina Solar",
+    "model": "Vertex N",
+    "family": "Vertex N",
+    "length": 1762,
+    "width": 1134,
+    "thickness": 30,
+    "weight": 21,
+    "wattage": { "min": 445, "max": 470 },
+    "cellCount": 144,
+    "cellType": "TOPCon",
+    "frameColor": "black",
+    "efficiency": 23.1,
+    "stcRating": {
+      "irradianceWPerM2": 1000,
+      "cellTemperatureC": 25,
+      "airMass": 1.5
+    }
+  },
+  {
+    "id": "longi-hi-mo-6",
+    "code": "Hi-MO 6",
+    "manufacturer": "LONGi",
+    "model": "Hi-MO 6",
+    "family": "Hi-MO 6",
+    "length": 1722,
+    "width": 1134,
+    "thickness": 30,
+    "weight": 20.8,
+    "wattage": { "min": 435, "max": 460 },
+    "cellCount": 144,
+    "cellType": "TOPCon",
+    "frameColor": "black",
+    "efficiency": 23,
+    "stcRating": {
+      "irradianceWPerM2": 1000,
+      "cellTemperatureC": 25,
+      "airMass": 1.5
+    }
+  },
+  {
+    "id": "longi-hi-mo-x6",
+    "code": "Hi-MO X6",
+    "manufacturer": "LONGi",
+    "model": "Hi-MO X6",
+    "family": "Hi-MO X6",
+    "length": 1722,
+    "width": 1134,
+    "thickness": 30,
+    "weight": 20.8,
+    "wattage": { "min": 430, "max": 460 },
+    "cellCount": 144,
+    "cellType": "TOPCon",
+    "frameColor": "black",
+    "efficiency": 23,
+    "stcRating": {
+      "irradianceWPerM2": 1000,
+      "cellTemperatureC": 25,
+      "airMass": 1.5
+    }
+  },
+  {
+    "id": "canadian-solar-tophiku6",
+    "code": "TOPHiKu6",
+    "manufacturer": "Canadian Solar",
+    "model": "TOPHiKu6",
+    "family": "TOPHiKu6",
+    "length": 1961,
+    "width": 1134,
+    "thickness": 30,
+    "weight": 22.5,
+    "wattage": { "min": 430, "max": 455 },
+    "cellCount": 144,
+    "cellType": "TOPCon",
+    "frameColor": "black",
+    "efficiency": 23,
+    "stcRating": {
+      "irradianceWPerM2": 1000,
+      "cellTemperatureC": 25,
+      "airMass": 1.5
+    }
+  },
+  {
+    "id": "rec-alpha-pure-rx",
+    "code": "Alpha Pure-RX",
+    "manufacturer": "REC",
+    "model": "Alpha Pure-RX",
+    "family": "Alpha Pure-RX",
+    "length": 1728,
+    "width": 1205,
+    "thickness": 30,
+    "weight": 22.7,
+    "wattage": { "min": 410, "max": 430 },
+    "cellCount": 88,
+    "cellType": "HJT",
+    "frameColor": "black",
+    "efficiency": 21.4,
+    "stcRating": {
+      "irradianceWPerM2": 1000,
+      "cellTemperatureC": 25,
+      "airMass": 1.5
+    }
+  }
+]
