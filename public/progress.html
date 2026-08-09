@@ -368,6 +368,10 @@
         text-transform: uppercase;
       }
 
+      .gate-status--ready {
+        color: var(--accent-strong);
+      }
+
       .gate-status::before {
         width: 6px;
         height: 6px;
@@ -514,9 +518,13 @@
           </p>
         </div>
         <aside class="live-card" aria-label="Current delivery state">
-          <div class="live-label"><span class="pulse" aria-hidden="true"></span>Work in progress</div>
-          <strong>Core slices are independently accepted</strong>
-            <small>App orchestration, browser evidence, and global critics remain in flight.</small>
+          <div class="live-label"><span class="pulse" aria-hidden="true"></span>Public fallback live</div>
+          <strong>PV Studio is reachable on GitHub Pages</strong>
+          <small>
+            <a href="https://mick-lumen.github.io/PVStudio/">Open the stable fallback URL</a>.
+            Preferred <code>pvstudio.thermaleye.app</code> remains pending DNS/auth; the final
+            full-system critic is still pending.
+          </small>
         </aside>
       </header>
 
@@ -529,32 +537,32 @@
           <article class="workstream">
             <h3>3D viewer</h3>
             <p>WebODM OBJ/MTL loading, camera controls, and resilient surface selection.</p>
-            <span class="state state--queued">Browser render evidence pending</span>
+            <span class="state state--ready">Browser verified on public fallback</span>
           </article>
           <article class="workstream">
             <h3>Panel chooser</h3>
             <p>Data-driven real-module catalog, custom dimensions, and chooser interaction.</p>
-            <span class="state state--ready">Independently accepted</span>
+            <span class="state state--ready">Browser verified on public fallback</span>
           </article>
           <article class="workstream">
             <h3>Panel placement</h3>
             <p>Surface-snapped manual placement, arrays, settings, and auto-fill preview.</p>
-            <span class="state state--ready">Independently accepted</span>
+            <span class="state state--ready">Browser verified on public fallback</span>
           </article>
           <article class="workstream">
             <h3>Rendering</h3>
             <p>Panel layers, status overlays, shadows, and model-import rendering lifecycle.</p>
-            <span class="state state--ready">Independently accepted</span>
+            <span class="state state--ready">Browser verified on public fallback</span>
           </article>
           <article class="workstream">
             <h3>Application shell</h3>
             <p>Workspace chrome, controls, and responsive interaction framing.</p>
-            <span class="state state--ready">Independently accepted</span>
+            <span class="state state--ready">Browser verified on public fallback</span>
           </article>
           <article class="workstream">
             <h3>App orchestration</h3>
             <p>Connects catalog, placement store, viewer surfaces, and end-to-end actions.</p>
-            <span class="state state--active">Integration in progress</span>
+            <span class="state state--ready">Browser verified on public fallback</span>
           </article>
         </div>
       </section>
@@ -562,7 +570,7 @@
       <section class="section" aria-labelledby="fixture-heading">
         <div class="section-heading">
           <h2 id="fixture-heading">Checked-in browser fixture</h2>
-          <p>Evidence is local and inspectable before public deployment.</p>
+          <p>Fixture links and public fallback evidence are inspectable here.</p>
         </div>
         <div class="surface fixture-card">
           <div>
@@ -571,7 +579,9 @@
               A deterministic CC0 stand-in with a pitched roof, four walls, surrounding ground,
               MTL materials, and three JPEG maps. The checked-in OBJ is exactly 25,715,444 bytes
               with 184,791 vertices and 365,760 triangular polygons; the validator reports 7/7
-              integrity checks passed.
+              integrity checks passed. On the public fallback, the sample request returned the OBJ,
+              MTL, and all three JPEG maps with HTTP 200 and rendered metadata of 1,097,280
+              vertices, 365,760 polygons, and 7 meshes.
             </p>
           </div>
           <ul class="fixture-links" aria-label="Synthetic WebODM house fixture files">
@@ -583,12 +593,13 @@
             <li><a href="test-data/synthetic-webodm-house/README.md">README · provenance and validation</a></li>
           </ul>
           <div class="fixture-status" aria-label="Fixture verification status">
-            <span class="state state--ready">Local parser and integrity tests passed</span>
-            <span class="state state--queued">Public browser render evidence pending</span>
+            <span class="state state--ready">Local parser and integrity tests passed · 7/7</span>
+            <span class="state state--ready">Public mobile browser render passed · 200 for 5 assets</span>
           </div>
           <p>
             The workspace exposes “Try sample” to load these URLs through the production Viewer
-            path without a file picker. A deployed browser smoke check has not been claimed yet.
+            path without a file picker. The public mobile smoke check confirmed the OBJ, MTL, and
+            three JPEG maps loaded, rendered, and reported the metadata above.
           </p>
         </div>
       </section>
@@ -611,16 +622,16 @@
             <h3>Luna critics <span>adversarial review</span></h3>
             <p>Inspect the running output against the OpenSolar interaction bar.</p>
             <ul>
-              <li>Viewer responsiveness and App integration remain under review</li>
-              <li>Browser and accessibility critics still pending</li>
+              <li>Manual browser flow and interaction evidence recorded on the public fallback</li>
+              <li>Final full-system critic remains pending</li>
             </ul>
           </article>
           <article class="role">
             <h3>Luna tester <span>verification</span></h3>
             <p>Run the complete quality gates and report reproducible failures.</p>
             <ul>
-              <li>Tests, typecheck, lint, and production build</li>
-              <li>Final system pass follows global critic approval</li>
+              <li>35 files · 222 tests, typecheck, lint, and production build pass</li>
+              <li>Fixture validator reports 7/7 integrity checks</li>
             </ul>
           </article>
         </div>
@@ -629,50 +640,50 @@
       <section class="section" aria-labelledby="gates-heading">
         <div class="section-heading">
           <h2 id="gates-heading">Quality gates</h2>
-          <p>Not signed off while any gate is pending.</p>
+          <p>Deployment, browser evidence, and local gates are complete; final critic remains pending.</p>
         </div>
         <div class="gates" role="list">
           <div class="gate" role="listitem">
             <strong>Component tests</strong>
             <small>Vitest + Testing Library</small>
-            <div class="gate-status">Pending App integration</div>
+            <div class="gate-status gate-status--ready">35 files · 222 tests passed</div>
           </div>
           <div class="gate" role="listitem">
             <strong>Strict typecheck</strong>
             <small>TypeScript project references</small>
-            <div class="gate-status">Pending App integration</div>
+            <div class="gate-status gate-status--ready">Passed</div>
           </div>
           <div class="gate" role="listitem">
             <strong>Lint</strong>
             <small>ESLint strict typed rules</small>
-            <div class="gate-status">Pending App integration</div>
+            <div class="gate-status gate-status--ready">Passed</div>
           </div>
           <div class="gate" role="listitem">
             <strong>Production build</strong>
             <small>Vite production output</small>
-            <div class="gate-status">Pending final gate</div>
+            <div class="gate-status gate-status--ready">Passed</div>
           </div>
           <div class="gate" role="listitem">
             <strong>Browser smoke</strong>
             <small>End-to-end workspace flow</small>
-            <div class="gate-status">Pending global critic</div>
+            <div class="gate-status gate-status--ready">Passed on public fallback</div>
           </div>
           <div class="gate" role="listitem">
             <strong>Accessibility</strong>
             <small>Keyboard, focus, and semantic review</small>
-            <div class="gate-status">Pending global critic</div>
+            <div class="gate-status gate-status--ready">Passed in manual checks</div>
           </div>
           <div class="gate" role="listitem">
             <strong>Final sign-off</strong>
             <small>Cross-workstream release review</small>
-            <div class="gate-status">Pending all gates</div>
+            <div class="gate-status">Pending final full-system critic</div>
           </div>
         </div>
       </section>
 
       <footer class="footer">
         <p>Scope: OBJ/MTL viewer · panel chooser · panel placement.</p>
-        <p><a href="/">Open the workspace</a> · status intentionally remains in progress.</p>
+        <p><a href="./">Open the workspace</a> · status remains in progress pending final full-system critic.</p>
       </footer>
     </main>
   </body>
