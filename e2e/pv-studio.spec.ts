@@ -196,6 +196,37 @@ test.describe('PV Studio production-browser workflow', () => {
     await expect(page.getByRole('heading', { name: 'Surface obstacles', exact: true })).toBeVisible({ timeout: ACTION_TIMEOUT })
     await expect(page.getByRole('button', { name: /Remove obstacle/ })).toBeVisible({ timeout: ACTION_TIMEOUT })
 
+    const obstacleX = page.getByLabel('Obstacle 1 X position')
+    const obstacleY = page.getByLabel('Obstacle 1 Y position')
+    const obstacleWidth = page.getByLabel('Obstacle 1 width')
+    const originalX = Number(await obstacleX.inputValue())
+    const originalY = Number(await obstacleY.inputValue())
+    const originalWidth = Number(await obstacleWidth.inputValue())
+
+    // Dragging from the obstacle's screen-space centre edits the existing
+    // obstacle instead of drawing another one. The change is a single
+    // chronological history entry alongside numeric inspector edits.
+    await dragCanvas(page, { xRatio: 0.505, yRatio: 0.60 }, { xRatio: 0.55, yRatio: 0.63 }, 8)
+    await expect.poll(async () => Number(await obstacleX.inputValue()), { timeout: ACTION_TIMEOUT }).not.toBe(originalX)
+    const movedX = Number(await obstacleX.inputValue())
+    const movedY = Number(await obstacleY.inputValue())
+
+    const editedWidth = originalWidth + 0.5
+    await obstacleWidth.fill(editedWidth.toFixed(2))
+    await obstacleWidth.blur()
+    await expect(obstacleWidth).toHaveValue(editedWidth.toFixed(2))
+
+    const undoButton = page.getByRole('button', { name: 'Undo last action', exact: true })
+    const redoButton = page.getByRole('button', { name: 'Redo last action', exact: true })
+    await undoButton.click()
+    await expect.poll(async () => Number(await obstacleWidth.inputValue()), { timeout: ACTION_TIMEOUT }).toBe(originalWidth)
+    await undoButton.click()
+    await expect.poll(async () => Number(await obstacleX.inputValue()), { timeout: ACTION_TIMEOUT }).toBe(originalX)
+    await expect.poll(async () => Number(await obstacleY.inputValue()), { timeout: ACTION_TIMEOUT }).toBe(originalY)
+    await redoButton.click()
+    await expect.poll(async () => Number(await obstacleX.inputValue()), { timeout: ACTION_TIMEOUT }).toBe(movedX)
+    await expect.poll(async () => Number(await obstacleY.inputValue()), { timeout: ACTION_TIMEOUT }).toBe(movedY)
+
     await page.getByLabel('Panel orientation').selectOption('landscape')
     await page.getByLabel('Edge setback in metres').fill('0.35')
     await page.getByLabel('Panel spacing in metres').fill('0.04')

@@ -2,7 +2,7 @@ import type { ViewerModelSource } from '../viewer'
 
 /** Public paths for the checked-in, deterministic WebODM-shaped fixture. */
 export const SAMPLE_MODEL_ASSET_NAMES = Object.freeze({
-  obj: 'synthetic-webodm-house.obj',
+  obj: 'synthetic-webodm-house.obj.gz',
   mtl: 'synthetic-webodm-house.mtl',
   textures: Object.freeze(['ground-texture.jpg', 'roof-texture.jpg', 'wall-texture.jpg']),
 })
@@ -49,5 +49,6 @@ export function createSampleViewerSource(basePath?: string): ViewerModelSource {
     mtl: paths.mtl,
     textures: paths.textures,
     name: 'Synthetic WebODM house',
+    upAxis: 'y',
   })
 }

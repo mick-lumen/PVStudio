@@ -56,11 +56,28 @@ export interface ViewerSurfaceIndexOptions {
   readonly signal?: AbortSignal
   /** Faces processed between macrotask yields. */
   readonly chunkSize?: number
+  /**
+   * Excludes microscopic photogrammetry fragments from the interactive
+   * design index without removing them from the rendered model. Low-level
+   * grouping callers retain every surface when this option is omitted.
+   */
+  readonly minimumSurfaceAreaM2?: number
+  /**
+   * Publishes the selectable surface index before constructing optional
+   * raycast acceleration grids. Picking remains correct through the packed
+   * face fallback while the grids are prepared cooperatively in the
+   * background.
+   */
+  readonly deferRaycastGrids?: boolean
 }
 
 interface IndexedMesh {
   readonly mesh: ViewerMesh
   readonly packed: PackedSurfaceMesh
+  /** Original packed group numbers retained as selectable design surfaces. */
+  readonly groupNumbers: Uint32Array
+  /** O(1) face-group eligibility check for intersection resolution. */
+  readonly groupMask: Uint8Array
 }
 
 /** A model-scoped, immutable surface index. It owns no public Three.js DTOs. */
@@ -72,6 +89,8 @@ export interface ViewerSurfaceIndex {
   readonly surfaceDescriptors: () => readonly SurfaceDescriptor[]
   /** Cooperative descriptor materialisation for large models. */
   readonly surfaceDescriptorsAsync: (options?: ViewerSurfaceIndexOptions) => Promise<readonly SurfaceDescriptor[]>
+  /** Cooperatively prepares optional picking acceleration after publication. */
+  readonly prepareRaycastGridsAsync: (options?: ViewerSurfaceIndexOptions) => Promise<void>
   readonly selectionForIntersection: (intersection: ViewerIntersectionLike) => ViewerSurfaceHit | null
   /** Fast raw model-space picking path used by the R3F event proxy. */
   readonly raycastRawRay: (ray: THREE.Ray) => ViewerSurfaceRaycastHit | null
@@ -225,7 +244,24 @@ function abortSurfaceIndex(signal: AbortSignal | undefined): void {
 }
 
 function yieldSurfaceIndexTask(): Promise<void> {
-  return new Promise((resolve) => { setTimeout(resolve, 0) })
+  // Nested zero-delay timers are clamped by browsers.  A large photogrammetry
+  // model can need thousands of cooperative slices, turning a few seconds of
+  // numeric work into minutes before its selectable surfaces are published.
+  // MessageChannel still yields to rendering and pointer work, but schedules
+  // the continuation as an unclamped task.  The timer fallback keeps this
+  // usable in runtimes without MessageChannel.
+  if (typeof MessageChannel === 'undefined') {
+    return new Promise((resolve) => { setTimeout(resolve, 0) })
+  }
+  return new Promise((resolve) => {
+    const channel = new MessageChannel()
+    channel.port1.onmessage = () => {
+      channel.port1.close()
+      channel.port2.close()
+      resolve()
+    }
+    channel.port2.postMessage(undefined)
+  })
 }
 
 function chunkSizeFor(options: ViewerSurfaceIndexOptions): number {
@@ -267,7 +303,7 @@ function matrixIsIdentity(matrix: THREE.Matrix4): boolean {
     && elements[12] === 0 && elements[13] === 0 && elements[14] === 0 && elements[15] === 1
 }
 
-/** Indexed OBJ geometry already has exact endpoint identity. */
+/** Most indexed geometry has exact endpoint identity; imported tuple seams opt into coordinate identity. */
 function assignFaceVertexIds(scratch: FaceComputationScratch, table: VertexTable | null): void {
   if (table === null) {
     scratch.vertexIdA = scratch.positionIndexA
@@ -278,6 +314,10 @@ function assignFaceVertexIds(scratch: FaceComputationScratch, table: VertexTable
   scratch.vertexIdA = internVertex(table, scratch.ax, scratch.ay, scratch.az, scratch.positionIndexA)
   scratch.vertexIdB = internVertex(table, scratch.bx, scratch.by, scratch.bz, scratch.positionIndexB)
   scratch.vertexIdC = internVertex(table, scratch.cx, scratch.cy, scratch.cz, scratch.positionIndexC)
+}
+
+function coordinateVertexIdentityRequired(geometry: THREE.BufferGeometry): boolean {
+  return geometry.index === null || geometry.userData.surfaceVertexIdentity === 'coordinate'
 }
 
 function transformPoint(point: readonly [number, number, number], matrix: THREE.Matrix4): [number, number, number] {
@@ -565,6 +605,7 @@ function samePlane(
   first: number,
   second: number,
   normals: Float32Array,
+  centers: Float32Array,
   planeOffsets: Float64Array,
   tolerance: SurfaceTolerance,
 ): boolean {
@@ -580,8 +621,26 @@ function samePlane(
   ))
   const firstPlane = planeOffsets[first] ?? 0
   const secondPlane = planeOffsets[second] ?? 0
-  const planeDifference = Math.min(Math.abs(firstPlane - secondPlane), Math.abs(firstPlane + secondPlane))
-  return normalDifference <= tolerance.normal && planeDifference <= tolerance.plane
+  // Comparing plane constants directly is only valid when the normals are
+  // identical. Even a small normal difference makes that comparison depend
+  // on the model's distance from the world origin, which fragmented real
+  // georeferenced photogrammetry into one surface per triangle. Compare each
+  // face centre with the other face's plane instead; this is translation
+  // invariant and still prevents disconnected, offset planes from merging.
+  const firstToSecond = Math.abs(
+    (normals[firstOffset] ?? 0) * (centers[secondOffset] ?? 0)
+      + (normals[firstOffset + 1] ?? 0) * (centers[secondOffset + 1] ?? 0)
+      + (normals[firstOffset + 2] ?? 0) * (centers[secondOffset + 2] ?? 0)
+      - firstPlane,
+  )
+  const secondToFirst = Math.abs(
+    (normals[secondOffset] ?? 0) * (centers[firstOffset] ?? 0)
+      + (normals[secondOffset + 1] ?? 0) * (centers[firstOffset + 1] ?? 0)
+      + (normals[secondOffset + 2] ?? 0) * (centers[firstOffset + 2] ?? 0)
+      - secondPlane,
+  )
+  return normalDifference <= tolerance.normal
+    && Math.max(firstToSecond, secondToFirst) <= tolerance.plane
 }
 
 function writeWorldPoint(
@@ -1005,6 +1064,7 @@ function addEdgeOccurrence(
   localEdge: number,
   parent: Int32Array,
   normals: Float32Array,
+  centers: Float32Array,
   planeOffsets: Float64Array,
   tolerance: SurfaceTolerance,
 ): number {
@@ -1020,7 +1080,7 @@ function addEdgeOccurrence(
   let compared = 0
   while (linked >= 0 && compared < MAX_EDGE_ADJACENCY) {
     const otherSample = edgeFaces[linked]
-    if (otherSample !== undefined && samePlane(sampleIndex, otherSample, normals, planeOffsets, tolerance)) union(parent, sampleIndex, otherSample)
+    if (otherSample !== undefined && samePlane(sampleIndex, otherSample, normals, centers, planeOffsets, tolerance)) union(parent, sampleIndex, otherSample)
     linked = edgeNext[linked] ?? -1
     compared += 1
   }
@@ -1055,10 +1115,13 @@ function buildPackedSurfaceMesh(
   const edgeLocals = new Uint8Array(edgeCapacity)
   edgeNext.fill(-1)
   const table = createEdgeTable(edgeCapacity)
-  // Indexed geometry already carries exact endpoint identity in its source
-  // vertex indices. Avoid the coordinate hash/table entirely on that hot path;
-  // the table remains necessary for unindexed or cross-mesh geometry.
-  const vertexTable = index === null ? createVertexTable(position, matrix, tolerance.position, false) : null
+  // Regular indexed geometry carries exact endpoint identity in its source
+  // indices. OBJ tuple geometry deliberately opts into coordinate identity so
+  // UV/normal seams do not split a physical roof into thousands of surfaces.
+  const coordinateIdentity = coordinateVertexIdentityRequired(mesh.geometry)
+  const vertexTable = coordinateIdentity
+    ? createVertexTable(position, matrix, tolerance.position, index !== null)
+    : null
   const identity = matrixIsIdentity(matrix)
   const scratch = makeScratch()
   let validCount = 0
@@ -1080,11 +1143,11 @@ function buildPackedSurfaceMesh(
     planeOffsets[sampleIndex] = scratch.planeOffset
     assignFaceVertexIds(scratch, vertexTable)
     writeEdgeVertexPair(scratch.vertexIdA, scratch.vertexIdB, scratch)
-    edgeCursor = addEdgeOccurrence(table, edgeFaces, edgeNext, edgeLocals, edgeCursor, scratch.edgeVertexA, scratch.edgeVertexB, sampleIndex, 0, parent, normals, planeOffsets, tolerance)
+    edgeCursor = addEdgeOccurrence(table, edgeFaces, edgeNext, edgeLocals, edgeCursor, scratch.edgeVertexA, scratch.edgeVertexB, sampleIndex, 0, parent, normals, centers, planeOffsets, tolerance)
     writeEdgeVertexPair(scratch.vertexIdB, scratch.vertexIdC, scratch)
-    edgeCursor = addEdgeOccurrence(table, edgeFaces, edgeNext, edgeLocals, edgeCursor, scratch.edgeVertexA, scratch.edgeVertexB, sampleIndex, 1, parent, normals, planeOffsets, tolerance)
+    edgeCursor = addEdgeOccurrence(table, edgeFaces, edgeNext, edgeLocals, edgeCursor, scratch.edgeVertexA, scratch.edgeVertexB, sampleIndex, 1, parent, normals, centers, planeOffsets, tolerance)
     writeEdgeVertexPair(scratch.vertexIdC, scratch.vertexIdA, scratch)
-    edgeCursor = addEdgeOccurrence(table, edgeFaces, edgeNext, edgeLocals, edgeCursor, scratch.edgeVertexA, scratch.edgeVertexB, sampleIndex, 2, parent, normals, planeOffsets, tolerance)
+    edgeCursor = addEdgeOccurrence(table, edgeFaces, edgeNext, edgeLocals, edgeCursor, scratch.edgeVertexA, scratch.edgeVertexB, sampleIndex, 2, parent, normals, centers, planeOffsets, tolerance)
   }
   const packed = finalisePackedSurfaceMesh(mesh, matrix, faceCount, validCount, faceIndices, normals, centers, areas, planeOffsets, parent, tolerance.position, table, edgeFaces, edgeNext, edgeLocals)
   return { ...packed, exteriorCenter: resolvedExteriorCenter, analysisMatrix: matrix }
@@ -1134,6 +1197,30 @@ function groupsForPacked(packed: PackedSurfaceMesh): readonly ViewerSurfaceGroup
   for (let group = 0; group < groupCount; group += 1) groups.push(buildGroupForPacked(packed, group))
   packed.allGroups = groups
   return groups
+}
+
+function minimumSurfaceAreaFor(options: ViewerSurfaceIndexOptions): number {
+  const minimum = options.minimumSurfaceAreaM2 ?? 0
+  if (!Number.isFinite(minimum) || minimum < 0) {
+    throw new RangeError('minimumSurfaceAreaM2 must be a finite, non-negative number')
+  }
+  return minimum
+}
+
+function indexedMeshFor(mesh: ViewerMesh, packed: PackedSurfaceMesh, minimumSurfaceAreaM2: number): IndexedMesh {
+  const groupCount = packed.groupOffsets.length - 1
+  const selected: number[] = []
+  const groupMask = new Uint8Array(groupCount)
+  for (let groupNumber = 0; groupNumber < groupCount; groupNumber += 1) {
+    if ((packed.groupAreas[groupNumber] ?? 0) < minimumSurfaceAreaM2) continue
+    selected.push(groupNumber)
+    groupMask[groupNumber] = 1
+  }
+  return { mesh, packed, groupNumbers: Uint32Array.from(selected), groupMask }
+}
+
+function groupsForIndexed(entry: IndexedMesh): readonly ViewerSurfaceGroup[] {
+  return Array.from(entry.groupNumbers, (groupNumber) => buildGroupForPacked(entry.packed, groupNumber))
 }
 
 function projectedTriangleBounds(
@@ -1281,22 +1368,26 @@ async function buildGroupRaycastGridAsync(
   return step.value
 }
 
-function buildRaycastGrids(packed: PackedSurfaceMesh): void {
-  const groups = groupsForPacked(packed)
-  packed.raycastGrids = groups.map((group) => buildGroupRaycastGrid(group))
-  packed.raycastStamps = new Uint32Array(packed.faceCount)
-  packed.raycastStamp = 0
+function buildRaycastGrids(entry: IndexedMesh): void {
+  const groupCount = entry.packed.groupOffsets.length - 1
+  const grids: Array<GroupRaycastGrid | null> = Array.from({ length: groupCount }, () => null)
+  for (const groupNumber of entry.groupNumbers) {
+    grids[groupNumber] = buildGroupRaycastGrid(buildGroupForPacked(entry.packed, groupNumber))
+  }
+  entry.packed.raycastGrids = grids
+  entry.packed.raycastStamps = new Uint32Array(entry.packed.faceCount)
+  entry.packed.raycastStamp = 0
 }
 
-async function buildRaycastGridsAsync(packed: PackedSurfaceMesh, options: ViewerSurfaceIndexOptions): Promise<void> {
-  const groups = groupsForPacked(packed)
-  const grids: Array<GroupRaycastGrid | null> = []
-  for (const group of groups) {
-    grids.push(await buildGroupRaycastGridAsync(group, options))
+async function buildRaycastGridsAsync(entry: IndexedMesh, options: ViewerSurfaceIndexOptions): Promise<void> {
+  const groupCount = entry.packed.groupOffsets.length - 1
+  const grids: Array<GroupRaycastGrid | null> = Array.from({ length: groupCount }, () => null)
+  for (const groupNumber of entry.groupNumbers) {
+    grids[groupNumber] = await buildGroupRaycastGridAsync(buildGroupForPacked(entry.packed, groupNumber), options)
   }
-  packed.raycastGrids = grids
-  packed.raycastStamps = new Uint32Array(packed.faceCount)
-  packed.raycastStamp = 0
+  entry.packed.raycastGrids = grids
+  entry.packed.raycastStamps = new Uint32Array(entry.packed.faceCount)
+  entry.packed.raycastStamp = 0
 }
 
 function faceTriangleVectors(
@@ -1404,7 +1495,10 @@ async function buildPackedSurfaceMeshAsync(
   const edgeLocals = new Uint8Array(edgeCapacity)
   edgeNext.fill(-1)
   const table = createEdgeTable(edgeCapacity)
-  const vertexTable = index === null ? createVertexTable(position, matrix, tolerance.position, false) : null
+  const coordinateIdentity = coordinateVertexIdentityRequired(mesh.geometry)
+  const vertexTable = coordinateIdentity
+    ? createVertexTable(position, matrix, tolerance.position, index !== null)
+    : null
   const identity = matrixIsIdentity(matrix)
   const scratch = makeScratch()
   const chunkSize = chunkSizeFor(options)
@@ -1428,11 +1522,11 @@ async function buildPackedSurfaceMeshAsync(
       planeOffsets[sampleIndex] = scratch.planeOffset
       assignFaceVertexIds(scratch, vertexTable)
       writeEdgeVertexPair(scratch.vertexIdA, scratch.vertexIdB, scratch)
-      edgeCursor = addEdgeOccurrence(table, edgeFaces, edgeNext, edgeLocals, edgeCursor, scratch.edgeVertexA, scratch.edgeVertexB, sampleIndex, 0, parent, normals, planeOffsets, tolerance)
+      edgeCursor = addEdgeOccurrence(table, edgeFaces, edgeNext, edgeLocals, edgeCursor, scratch.edgeVertexA, scratch.edgeVertexB, sampleIndex, 0, parent, normals, centers, planeOffsets, tolerance)
       writeEdgeVertexPair(scratch.vertexIdB, scratch.vertexIdC, scratch)
-      edgeCursor = addEdgeOccurrence(table, edgeFaces, edgeNext, edgeLocals, edgeCursor, scratch.edgeVertexA, scratch.edgeVertexB, sampleIndex, 1, parent, normals, planeOffsets, tolerance)
+      edgeCursor = addEdgeOccurrence(table, edgeFaces, edgeNext, edgeLocals, edgeCursor, scratch.edgeVertexA, scratch.edgeVertexB, sampleIndex, 1, parent, normals, centers, planeOffsets, tolerance)
       writeEdgeVertexPair(scratch.vertexIdC, scratch.vertexIdA, scratch)
-      edgeCursor = addEdgeOccurrence(table, edgeFaces, edgeNext, edgeLocals, edgeCursor, scratch.edgeVertexA, scratch.edgeVertexB, sampleIndex, 2, parent, normals, planeOffsets, tolerance)
+      edgeCursor = addEdgeOccurrence(table, edgeFaces, edgeNext, edgeLocals, edgeCursor, scratch.edgeVertexA, scratch.edgeVertexB, sampleIndex, 2, parent, normals, centers, planeOffsets, tolerance)
     }
     if ((faceIndex + 1) % chunkSize === 0 && faceIndex + 1 < faceCount) await yieldSurfaceIndexTask()
   }
@@ -1480,40 +1574,6 @@ function triangleWorldVertices(
   target.a[0] = worldA[0]; target.a[1] = worldA[1]; target.a[2] = worldA[2]
   target.b[0] = worldB[0]; target.b[1] = worldB[1]; target.b[2] = worldB[2]
   target.c[0] = worldC[0]; target.c[1] = worldC[1]; target.c[2] = worldC[2]
-  return true
-}
-
-function edgeWorldVertices(
-  mesh: ViewerMesh,
-  faceIndex: number,
-  localEdge: number,
-  target: { readonly first: [number, number, number]; readonly second: [number, number, number] },
-  analysisMatrix = mesh.matrixWorld,
-): boolean {
-  if (!mesh.geometry.hasAttribute('position')) return false
-  const position = mesh.geometry.getAttribute('position')
-  const index = mesh.geometry.index
-  const offset = faceIndex * 3
-  const ai = index?.getX(offset) ?? offset
-  const bi = index?.getX(offset + 1) ?? offset + 1
-  const ci = index?.getX(offset + 2) ?? offset + 2
-  let firstIndex = ai
-  let secondIndex = bi
-  if (localEdge === 1) {
-    firstIndex = bi
-    secondIndex = ci
-  } else if (localEdge === 2) {
-    firstIndex = ci
-    secondIndex = ai
-  }
-  const first = transformPoint(positionAt(position, firstIndex), analysisMatrix)
-  const second = transformPoint(positionAt(position, secondIndex), analysisMatrix)
-  target.first[0] = first[0]
-  target.first[1] = first[1]
-  target.first[2] = first[2]
-  target.second[0] = second[0]
-  target.second[1] = second[1]
-  target.second[2] = second[2]
   return true
 }
 
@@ -1630,6 +1690,88 @@ function polygonArea(points: readonly Point2[]): number {
   return Math.abs(sum) / 2
 }
 
+const SURFACE_BOUNDARY_EPSILON = 1e-9
+
+function boundaryCross(first: Point2, second: Point2, point: Point2): number {
+  return (second.x - first.x) * (point.y - first.y) - (second.y - first.y) * (point.x - first.x)
+}
+
+function pointOnBoundarySegment(first: Point2, second: Point2, point: Point2): boolean {
+  return point.x >= Math.min(first.x, second.x) - SURFACE_BOUNDARY_EPSILON
+    && point.x <= Math.max(first.x, second.x) + SURFACE_BOUNDARY_EPSILON
+    && point.y >= Math.min(first.y, second.y) - SURFACE_BOUNDARY_EPSILON
+    && point.y <= Math.max(first.y, second.y) + SURFACE_BOUNDARY_EPSILON
+    && Math.abs(boundaryCross(first, second, point)) <= SURFACE_BOUNDARY_EPSILON
+}
+
+function boundarySegmentsIntersect(firstStart: Point2, firstEnd: Point2, secondStart: Point2, secondEnd: Point2): boolean {
+  const first = boundaryCross(firstStart, firstEnd, secondStart)
+  const second = boundaryCross(firstStart, firstEnd, secondEnd)
+  const third = boundaryCross(secondStart, secondEnd, firstStart)
+  const fourth = boundaryCross(secondStart, secondEnd, firstEnd)
+  if (((first > SURFACE_BOUNDARY_EPSILON && second < -SURFACE_BOUNDARY_EPSILON)
+      || (first < -SURFACE_BOUNDARY_EPSILON && second > SURFACE_BOUNDARY_EPSILON))
+    && ((third > SURFACE_BOUNDARY_EPSILON && fourth < -SURFACE_BOUNDARY_EPSILON)
+      || (third < -SURFACE_BOUNDARY_EPSILON && fourth > SURFACE_BOUNDARY_EPSILON))) return true
+  return (Math.abs(first) <= SURFACE_BOUNDARY_EPSILON && pointOnBoundarySegment(firstStart, firstEnd, secondStart))
+    || (Math.abs(second) <= SURFACE_BOUNDARY_EPSILON && pointOnBoundarySegment(firstStart, firstEnd, secondEnd))
+    || (Math.abs(third) <= SURFACE_BOUNDARY_EPSILON && pointOnBoundarySegment(secondStart, secondEnd, firstStart))
+    || (Math.abs(fourth) <= SURFACE_BOUNDARY_EPSILON && pointOnBoundarySegment(secondStart, secondEnd, firstEnd))
+}
+
+/**
+ * Photogrammetry meshes can contain branched or non-manifold boundary edges.
+ * Such walks may close while still crossing themselves, but placement regions
+ * must always be simple polygons so one noisy patch cannot invalidate the
+ * entire model context.
+ */
+export function isSimpleSurfaceBoundary(points: readonly Point2[]): boolean {
+  if (points.length < 3 || polygonArea(points) <= SURFACE_BOUNDARY_EPSILON) return false
+  for (let first = 0; first < points.length; first += 1) {
+    const firstStart = points[first]
+    const firstEnd = points[(first + 1) % points.length]
+    if (firstStart === undefined || firstEnd === undefined) return false
+    const edgeX = firstEnd.x - firstStart.x
+    const edgeY = firstEnd.y - firstStart.y
+    if (edgeX * edgeX + edgeY * edgeY <= SURFACE_BOUNDARY_EPSILON * SURFACE_BOUNDARY_EPSILON) return false
+    for (let second = first + 1; second < points.length; second += 1) {
+      const secondStart = points[second]
+      const secondEnd = points[(second + 1) % points.length]
+      if (secondStart === undefined || secondEnd === undefined) return false
+      const adjacent = second === first + 1 || (first === 0 && second === points.length - 1)
+      if (!adjacent && boundarySegmentsIntersect(firstStart, firstEnd, secondStart, secondEnd)) return false
+    }
+  }
+  return true
+}
+
+/** Selects the largest valid loop without mutating the caller's boundary list. */
+export function largestSimpleSurfaceBoundary(loops: readonly (readonly Point2[])[]): readonly Point2[] | undefined {
+  return [...loops]
+    .filter(isSimpleSurfaceBoundary)
+    .sort((first, second) => polygonArea(second) - polygonArea(first))[0]
+}
+
+function largestFaceRegion(group: ViewerSurfaceGroup, frame: SurfaceFrame): SurfaceRegion | undefined {
+  const scratch = makeTriangleScratch()
+  let largest: readonly Point2[] | undefined
+  let largestArea = 0
+  for (const faceIndex of group.faceIndices) {
+    if (!triangleWorldVertices(group.mesh, faceIndex, scratch, group.analysisMatrix)) continue
+    const points = [
+      projectedPoint(scratch.a, group, frame),
+      projectedPoint(scratch.b, group, frame),
+      projectedPoint(scratch.c, group, frame),
+    ]
+    const area = polygonArea(points)
+    if (area > largestArea && isSimpleSurfaceBoundary(points)) {
+      largest = points
+      largestArea = area
+    }
+  }
+  return largest === undefined ? undefined : { points: largest }
+}
+
 interface BoundaryEdge {
   readonly key: bigint
   readonly firstKey: number
@@ -1661,6 +1803,94 @@ function regionEdgeKey(first: number, second: number): bigint {
   return cantorPair(BigInt(low), BigInt(high))
 }
 
+function regionDirectedEdgeKey(first: number, second: number): bigint {
+  return cantorPair(BigInt(first), BigInt(second))
+}
+
+/**
+ * Traces the faces of a planar boundary graph using a deterministic half-edge
+ * rotation system. Real photogrammetry often contains boundary vertices with
+ * more than two incident edges. Picking the first unused undirected edge at
+ * those junctions can consume part of a large roof in a tiny, arbitrary loop.
+ *
+ * Each directed edge is instead followed by the neighbour immediately before
+ * its reverse edge in angular order. This keeps the same face on one side of
+ * the walk, recovers every bounded loop, and never invents an edge that is not
+ * present in the supplied surface boundary.
+ */
+export function tracePlanarSurfaceBoundaryLoops(
+  adjacency: ReadonlyMap<number, ReadonlySet<number>>,
+  vertices: ReadonlyMap<number, Point2>,
+): readonly (readonly Point2[])[] {
+  const sortedAdjacency = new Map<number, readonly number[]>()
+  for (const [vertexId, neighbours] of adjacency) {
+    const origin = vertices.get(vertexId)
+    if (origin === undefined) continue
+    const sorted = [...neighbours]
+      .filter((neighbourId) => neighbourId !== vertexId && vertices.has(neighbourId))
+      .sort((firstId, secondId) => {
+        const first = vertices.get(firstId)
+        const second = vertices.get(secondId)
+        if (first === undefined || second === undefined) return firstId - secondId
+        const firstAngle = Math.atan2(first.y - origin.y, first.x - origin.x)
+        const secondAngle = Math.atan2(second.y - origin.y, second.x - origin.x)
+        const angleDelta = firstAngle - secondAngle
+        return Math.abs(angleDelta) > SURFACE_BOUNDARY_EPSILON ? angleDelta : firstId - secondId
+      })
+    if (sorted.length > 0) sortedAdjacency.set(vertexId, sorted)
+  }
+
+  const vertexIds = [...sortedAdjacency.keys()].sort((first, second) => first - second)
+  const directedEdgeCount = [...sortedAdjacency.values()].reduce((total, neighbours) => total + neighbours.length, 0)
+  const visited = new Set<bigint>()
+  const loops: Point2[][] = []
+  for (const start of vertexIds) {
+    const startNeighbours = sortedAdjacency.get(start) ?? []
+    for (const neighbour of startNeighbours) {
+      const initialEdge = regionDirectedEdgeKey(start, neighbour)
+      if (visited.has(initialEdge)) continue
+      const loopKeys: number[] = []
+      let from = start
+      let to = neighbour
+      let closed = false
+      for (let guard = 0; guard <= directedEdgeCount; guard += 1) {
+        const directedEdge = regionDirectedEdgeKey(from, to)
+        if (visited.has(directedEdge)) {
+          closed = from === start && to === neighbour
+          break
+        }
+        visited.add(directedEdge)
+        loopKeys.push(from)
+        const outgoing = sortedAdjacency.get(to)
+        if (outgoing === undefined || outgoing.length === 0) break
+        const reverseIndex = outgoing.indexOf(from)
+        if (reverseIndex < 0) break
+        const nextIndex = (reverseIndex - 1 + outgoing.length) % outgoing.length
+        const next = outgoing[nextIndex]
+        if (next === undefined) break
+        from = to
+        to = next
+        if (from === start && to === neighbour) {
+          closed = true
+          break
+        }
+      }
+      if (!closed || loopKeys.length < 3) continue
+      const points: Point2[] = []
+      for (const key of loopKeys) {
+        const point = vertices.get(key)
+        if (point === undefined) {
+          points.length = 0
+          break
+        }
+        points.push(point)
+      }
+      if (points.length >= 3) loops.push(points)
+    }
+  }
+  return loops
+}
+
 /** Derives the outer boundary lazily, preserving concavities without index-time vertex copies. */
 function regionForGroup(group: ViewerSurfaceGroup, frame: SurfaceFrame): SurfaceRegion {
   // BigInt Cantor keys retain exact quantised endpoint identity. This avoids
@@ -1670,7 +1900,6 @@ function regionForGroup(group: ViewerSurfaceGroup, frame: SurfaceFrame): Surface
   const vertexIds = new Map<bigint, number>()
   const vertices = new Map<number, [number, number, number]>()
   const scratch = makeTriangleScratch()
-  const edgeScratch = { first: [0, 0, 0] as [number, number, number], second: [0, 0, 0] as [number, number, number] }
   const internVertex = (vertex: readonly [number, number, number]): number => {
     const token = regionVertexKey(vertex, group.positionTolerance)
     const existing = vertexIds.get(token)
@@ -1694,21 +1923,18 @@ function regionForGroup(group: ViewerSurfaceGroup, frame: SurfaceFrame): Surface
       second: [second[0], second[1], second[2]],
     })
   }
-  if (group.boundaryFaces.length > 0) {
-    for (let boundaryIndex = 0; boundaryIndex < group.boundaryFaces.length; boundaryIndex += 1) {
-      const faceIndex = group.boundaryFaces[boundaryIndex] ?? 0
-      const localEdge = group.boundaryLocals[boundaryIndex] ?? 0
-      if (edgeWorldVertices(group.mesh, faceIndex, localEdge, edgeScratch, group.analysisMatrix)) addBoundary(edgeScratch.first, edgeScratch.second)
-    }
-  } else {
-    // Keep a compatibility fallback for meshes whose index was created before
-    // boundary references were available (and for groups with no boundary).
-    for (const faceIndex of group.faceIndices) {
-      if (!triangleWorldVertices(group.mesh, faceIndex, scratch, group.analysisMatrix)) continue
-      addBoundary(scratch.a, scratch.b)
-      addBoundary(scratch.b, scratch.c)
-      addBoundary(scratch.c, scratch.a)
-    }
+  // Reconstruct the boundary within this surface group. The packed boundary
+  // references describe only edges on the outside of the complete mesh. A
+  // roof also ends where it shares an edge with a wall, dormer, or differently
+  // sloped roof face; those edges occur twice in the mesh but only once in the
+  // roof group. Using the mesh-level cache whenever it was non-empty produced
+  // open walks on real photogrammetry and collapsed otherwise large roofs to
+  // the conservative single-triangle fallback below.
+  for (const faceIndex of group.faceIndices) {
+    if (!triangleWorldVertices(group.mesh, faceIndex, scratch, group.analysisMatrix)) continue
+    addBoundary(scratch.a, scratch.b)
+    addBoundary(scratch.b, scratch.c)
+    addBoundary(scratch.c, scratch.a)
   }
   const adjacency = new Map<number, Set<number>>()
   for (const [key, count] of counts) {
@@ -1720,32 +1946,16 @@ function regionForGroup(group: ViewerSurfaceGroup, frame: SurfaceFrame): Surface
     first.add(edge.secondKey); second.add(edge.firstKey)
     adjacency.set(edge.firstKey, first); adjacency.set(edge.secondKey, second)
   }
-  const visited = new Set<bigint>()
-  const loops: Point2[][] = []
-  for (const start of adjacency.keys()) {
-    for (const neighbour of adjacency.get(start) ?? []) {
-      const initialEdge = regionEdgeKey(start, neighbour)
-      if (visited.has(initialEdge)) continue
-      const loopKeys: number[] = [start]
-      let previous = -1
-      let current = start
-      for (let guard = 0; guard < adjacency.size * 2; guard += 1) {
-        const options = [...(adjacency.get(current) ?? [])].filter((candidate) => candidate !== previous)
-        const next = options.find((candidate) => !visited.has(regionEdgeKey(current, candidate)))
-        if (next === undefined) break
-        visited.add(regionEdgeKey(current, next))
-        previous = current; current = next
-        if (current === start) break
-        loopKeys.push(current)
-      }
-      if (loopKeys.length >= 3 && current === start) {
-        const points = loopKeys.map((keyValue) => projectedPoint(vertices.get(keyValue) ?? [0, 0, 0], group, frame))
-        if (points.length >= 3) loops.push(points)
-      }
-    }
-  }
-  const largest = loops.sort((first, second) => polygonArea(second) - polygonArea(first))[0]
-  if (largest !== undefined && polygonArea(largest) > Number.EPSILON) return { points: largest }
+  const projectedVertices = new Map<number, Point2>()
+  for (const [vertexId, vertex] of vertices) projectedVertices.set(vertexId, projectedPoint(vertex, group, frame))
+  const loops = tracePlanarSurfaceBoundaryLoops(adjacency, projectedVertices)
+  const largest = largestSimpleSurfaceBoundary(loops)
+  if (largest !== undefined) return { points: largest }
+  // A self-intersecting boundary must never escape into the placement store.
+  // A real face triangle is conservative but truthful: it cannot place a
+  // panel in empty space as an enclosing AABB could.
+  const faceRegion = largestFaceRegion(group, frame)
+  if (faceRegion !== undefined) return faceRegion
   return localBounds(group, frame)
 }
 
@@ -1845,8 +2055,7 @@ async function materialiseSurfaceDescriptors(
   const chunkSize = chunkSizeFor(options)
   let processed = 0
   for (const entry of entries) {
-    const groupCount = entry.packed.groupOffsets.length - 1
-    for (let groupNumber = 0; groupNumber < groupCount; groupNumber += 1) {
+    for (const groupNumber of entry.groupNumbers) {
       abortSurfaceIndex(options.signal)
       descriptors.push(await descriptorForGroupAsync(buildGroupForPacked(entry.packed, groupNumber), options))
       processed += 1
@@ -1894,7 +2103,11 @@ export function viewerSurfaceHitFromIntersection(
   return group === undefined ? null : hitFromGroup(mesh, group, intersection)
 }
 
-function makeViewerSurfaceIndex(entries: readonly IndexedMesh[], modelId: string): ViewerSurfaceIndex {
+function makeViewerSurfaceIndex(
+  entries: readonly IndexedMesh[],
+  modelId: string,
+  buildMissingRaycastGrids = true,
+): ViewerSurfaceIndex {
   const byMesh = new Map<ViewerMesh, IndexedMesh>(entries.map((entry) => [entry.mesh, entry]))
   const descriptorCache = new Map<ViewerSurfaceGroup, SurfaceDescriptor>()
   // Build one bounded, model-scoped acceleration structure per packed mesh.
@@ -1905,19 +2118,23 @@ function makeViewerSurfaceIndex(entries: readonly IndexedMesh[], modelId: string
     // The cooperative builder pre-populates grids for imported models. Keep
     // the synchronous fallback for the small/public builder, but never redo
     // an already-built grid at the async tail.
-    if (entry.packed.raycastGrids === undefined) buildRaycastGrids(entry.packed)
+    if (buildMissingRaycastGrids && entry.packed.raycastGrids === undefined) buildRaycastGrids(entry)
   }
   let descriptors: readonly SurfaceDescriptor[] | undefined
   let descriptorsAsync: Promise<readonly SurfaceDescriptor[]> | undefined
+  let gridPreparation: Promise<void> | undefined
   return {
     modelId,
     meshes: entries,
-    groupsFor: (mesh) => byMesh.get(mesh) === undefined ? [] : groupsForPacked(byMesh.get(mesh)?.packed ?? emptyPackedSurfaceMesh(mesh)),
+    groupsFor: (mesh) => {
+      const entry = byMesh.get(mesh)
+      return entry === undefined ? [] : groupsForIndexed(entry)
+    },
     surfaceDescriptors: () => {
       if (descriptors !== undefined) return descriptors
       const next: SurfaceDescriptor[] = []
       for (const entry of entries) {
-        for (const group of groupsForPacked(entry.packed)) {
+        for (const group of groupsForIndexed(entry)) {
           const descriptor = descriptorForGroup(group)
           descriptorCache.set(group, descriptor)
           next.push(descriptor)
@@ -1933,7 +2150,7 @@ function makeViewerSurfaceIndex(entries: readonly IndexedMesh[], modelId: string
         .then((next) => {
           let descriptorIndex = 0
           for (const entry of entries) {
-            for (const group of groupsForPacked(entry.packed)) {
+            for (const group of groupsForIndexed(entry)) {
               const descriptor = next[descriptorIndex]
               if (descriptor !== undefined) descriptorCache.set(group, descriptor)
               descriptorIndex += 1
@@ -1949,6 +2166,21 @@ function makeViewerSurfaceIndex(entries: readonly IndexedMesh[], modelId: string
       descriptorsAsync = pending
       return pending
     },
+    prepareRaycastGridsAsync: (options = {}) => {
+      if (entries.every((entry) => entry.packed.raycastGrids !== undefined)) return Promise.resolve()
+      if (gridPreparation !== undefined) return gridPreparation
+      const pending = (async (): Promise<void> => {
+        for (const entry of entries) {
+          abortSurfaceIndex(options.signal)
+          if (entry.packed.raycastGrids === undefined) await buildRaycastGridsAsync(entry, options)
+        }
+      })().catch((cause: unknown) => {
+        gridPreparation = undefined
+        throw cause
+      })
+      gridPreparation = pending
+      return pending
+    },
     selectionForIntersection: (intersection) => {
       const mesh = meshFromIntersection(intersection)
       const faceIndex = intersection.faceIndex
@@ -1956,7 +2188,7 @@ function makeViewerSurfaceIndex(entries: readonly IndexedMesh[], modelId: string
       const entry = byMesh.get(mesh)
       if (entry === undefined || faceIndex < 0 || faceIndex >= entry.packed.faceToGroup.length) return null
       const groupNumber = entry.packed.faceToGroup[faceIndex] ?? -1
-      if (groupNumber < 0) return null
+      if (groupNumber < 0 || entry.groupMask[groupNumber] !== 1) return null
       const group = buildGroupForPacked(entry.packed, groupNumber)
       let descriptor = descriptorCache.get(group)
       if (descriptor === undefined) {
@@ -1968,10 +2200,8 @@ function makeViewerSurfaceIndex(entries: readonly IndexedMesh[], modelId: string
     raycastRawRay: (ray) => {
       let nearest: ViewerSurfaceRaycastHit | null = null
       for (const entry of entries) {
-        const groups = groupsForPacked(entry.packed)
-        for (let groupNumber = 0; groupNumber < groups.length; groupNumber += 1) {
-          const group = groups[groupNumber]
-          if (group === undefined) continue
+        for (const groupNumber of entry.groupNumbers) {
+          const group = buildGroupForPacked(entry.packed, groupNumber)
           const hit = raycastPackedGroup(entry.packed, group, groupNumber, ray, nearest?.distance ?? Number.POSITIVE_INFINITY)
           if (hit !== null && (nearest === null || hit.distance < nearest.distance)) nearest = hit
         }
@@ -1990,7 +2220,8 @@ export function createViewerSurfaceIndex(root: THREE.Object3D, modelId = root.uu
   root.traverse((child) => {
     if (!isViewerMesh(child) || child.userData.selectable === false || childAncestorsDisableSelection(child)) return
     const analysisMatrix = rootInverse.clone().multiply(child.matrixWorld)
-    entries.push({ mesh: child, packed: buildPackedSurfaceMesh(child, tolerance, exteriorCenter, analysisMatrix) })
+    const packed = buildPackedSurfaceMesh(child, tolerance, exteriorCenter, analysisMatrix)
+    entries.push(indexedMeshFor(child, packed, 0))
   })
   return makeViewerSurfaceIndex(entries, modelId)
 }
@@ -2012,11 +2243,13 @@ export async function createViewerSurfaceIndexAsync(
   })
   const entries: IndexedMesh[] = []
   const chunkSize = chunkSizeFor(options)
+  const minimumSurfaceAreaM2 = minimumSurfaceAreaFor(options)
   for (let meshIndex = 0; meshIndex < meshes.length; meshIndex += 1) {
     const mesh = meshes[meshIndex]
     if (mesh === undefined) continue
     const analysisMatrix = rootInverse.clone().multiply(mesh.matrixWorld)
-    entries.push({ mesh, packed: await buildPackedSurfaceMeshAsync(mesh, tolerance, options, exteriorCenter, analysisMatrix) })
+    const packed = await buildPackedSurfaceMeshAsync(mesh, tolerance, options, exteriorCenter, analysisMatrix)
+    entries.push(indexedMeshFor(mesh, packed, minimumSurfaceAreaM2))
     abortSurfaceIndex(options.signal)
     if ((meshIndex + 1) % chunkSize === 0 && meshIndex + 1 < meshes.length) await yieldSurfaceIndexTask()
   }
@@ -2024,11 +2257,13 @@ export async function createViewerSurfaceIndexAsync(
   // pointer event.  Build each large group in cooperative face passes so the
   // R3F/software-WebGL render loop remains responsive while descriptors are
   // materialised by the caller.
-  for (const entry of entries) {
-    abortSurfaceIndex(options.signal)
-    await buildRaycastGridsAsync(entry.packed, options)
+  if (options.deferRaycastGrids !== true) {
+    for (const entry of entries) {
+      abortSurfaceIndex(options.signal)
+      await buildRaycastGridsAsync(entry, options)
+    }
   }
-  return makeViewerSurfaceIndex(entries, modelId)
+  return makeViewerSurfaceIndex(entries, modelId, options.deferRaycastGrids !== true)
 }
 
 /** Exact retained typed-buffer bytes plus packed face references for planning. */

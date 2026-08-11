@@ -1,7 +1,10 @@
 node_modules
 dist
+.wrangler
 coverage
 *.tsbuildinfo
 .DS_Store
 __pycache__/
 *.py[cod]
+public/test-data/synthetic-webodm-house/synthetic-webodm-house.obj.gz
+worker/worker-configuration.d.ts

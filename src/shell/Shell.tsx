@@ -154,6 +154,7 @@ export interface ShellProps {
   readonly draftObstacle?: RectangularObstacle | null
   readonly onObstacleStart?: () => void
   readonly onObstacleCancel?: () => void
+  readonly onObstacleChange?: (id: string, patch: ObstacleGeometryPatch) => void
   readonly onObstacleRemove?: (id: string) => void
   readonly onObstaclesClear?: () => void
   readonly onAlignStart?: () => void
@@ -174,6 +175,8 @@ export interface ShellProps {
   readonly statusMessage?: string
   readonly className?: string
 }
+
+export type ObstacleGeometryPatch = Partial<Pick<RectangularObstacle, 'x' | 'y' | 'width' | 'height'>>
 
 interface ErrorBoundaryProps {
   readonly children: ReactNode
@@ -197,7 +200,7 @@ interface ToolDefinition {
 const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
   { id: 'select', label: 'Select', shortcut: 'V', description: 'Select a surface or panel', icon: MousePointer2 },
   { id: 'place', label: 'Place', shortcut: 'P', description: 'Place a panel on the active surface', icon: Plus },
-  { id: 'obstacle', label: 'Obstacle', shortcut: 'B', description: 'Draw a rectangular obstacle — drag on the active surface (minimum 0.05 m). Press Escape to cancel', icon: Square },
+  { id: 'obstacle', label: 'Obstacle', shortcut: 'B', description: 'Draw or move a rectangular obstacle — drag empty surface to draw, or drag an existing obstacle to move it. Press Escape to cancel', icon: Square },
   { id: 'autofill', label: 'Auto-fill', shortcut: 'A', description: 'Preview a filled layout', icon: Sparkles },
   { id: 'align', label: 'Align', shortcut: 'L', description: 'Align selected panels in a preview', icon: Layers3 },
 ]
@@ -543,18 +546,59 @@ function ZapIcon({ 'aria-hidden': ariaHidden }: { readonly 'aria-hidden'?: boole
   return <span className="inline-icon" aria-hidden={ariaHidden}>⚡</span>
 }
 
-function ObstacleSummary({ obstacles, draftObstacle, onRemove, onClear }: { readonly obstacles: readonly RectangularObstacle[]; readonly draftObstacle?: RectangularObstacle | null; readonly onRemove?: (id: string) => void; readonly onClear?: () => void }): ReactNode {
+function ObstacleNumberField({ label, value, minimum, onCommit }: { readonly label: string; readonly value: number; readonly minimum?: number; readonly onCommit: (value: number) => void }): ReactNode {
+  const [editor, setEditor] = useState({ committedValue: value, draft: String(value) })
+  if (editor.committedValue !== value) {
+    setEditor({ committedValue: value, draft: String(value) })
+  }
+
+  const commit = (): void => {
+    const next = Number(editor.draft)
+    if (!Number.isFinite(next) || (minimum !== undefined && next < minimum)) {
+      setEditor({ committedValue: value, draft: String(value) })
+      return
+    }
+    if (next !== value) onCommit(next)
+  }
+
+  return (
+    <label className="obstacle-field">
+      <span>{label}</span>
+      <span className="input-with-unit">
+        <input
+          type="number"
+          step={0.1}
+          {...(minimum === undefined ? {} : { min: minimum })}
+          value={editor.draft}
+          aria-label={`${label} in metres`}
+          onChange={(event) => { setEditor({ committedValue: value, draft: event.currentTarget.value }) }}
+          onBlur={commit}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') event.currentTarget.blur()
+            if (event.key === 'Escape') {
+              setEditor({ committedValue: value, draft: String(value) })
+              event.currentTarget.blur()
+            }
+          }}
+        />
+        <small>m</small>
+      </span>
+    </label>
+  )
+}
+
+function ObstacleSummary({ obstacles, draftObstacle, onChange, onRemove, onClear }: { readonly obstacles: readonly RectangularObstacle[]; readonly draftObstacle?: RectangularObstacle | null; readonly onChange?: (id: string, patch: ObstacleGeometryPatch) => void; readonly onRemove?: (id: string) => void; readonly onClear?: () => void }): ReactNode {
   return (
     <section className="inspector-card" aria-labelledby="obstacle-summary-title">
       <div className="inspector-card__title-row"><h3 id="obstacle-summary-title">Surface obstacles</h3><span className="surface-status"><span aria-hidden="true" />{String(obstacles.length)}</span></div>
-      {draftObstacle === null || draftObstacle === undefined ? null : <p className="inspector-note" role="status">Drawing obstacle · {draftObstacle.width.toFixed(2)} × {draftObstacle.height.toFixed(2)} m</p>}
-      {obstacles.length === 0 ? <p className="inspector-note">No obstacles on this surface.</p> : <ul className="obstacle-list">{obstacles.map((obstacle) => <li key={obstacle.id} className="obstacle-list__item"><span>{obstacle.width.toFixed(2)} × {obstacle.height.toFixed(2)} m</span><button className="icon-button icon-button--small" type="button" aria-label={`Remove obstacle ${obstacle.id}`} disabled={onRemove === undefined} onClick={() => { onRemove?.(obstacle.id) }}><X size={13} aria-hidden="true" /></button></li>)}</ul>}
+      {draftObstacle === null || draftObstacle === undefined ? null : <p className="inspector-note" role="status">Obstacle preview · {draftObstacle.width.toFixed(2)} × {draftObstacle.height.toFixed(2)} m</p>}
+      {obstacles.length === 0 ? <p className="inspector-note">No obstacles on this surface.</p> : <ul className="obstacle-list">{obstacles.map((obstacle, index) => <li key={obstacle.id} className="obstacle-list__item"><div className="obstacle-list__header"><strong>Obstacle {String(index + 1)}</strong><span>{obstacle.width.toFixed(2)} × {obstacle.height.toFixed(2)} m</span><button className="icon-button icon-button--small" type="button" aria-label={`Remove obstacle ${obstacle.id}`} disabled={onRemove === undefined} onClick={() => { onRemove?.(obstacle.id) }}><X size={13} aria-hidden="true" /></button></div>{onChange === undefined ? null : <div className="obstacle-field-grid"><ObstacleNumberField label={`Obstacle ${String(index + 1)} X position`} value={obstacle.x} onCommit={(value) => { onChange(obstacle.id, { x: value }) }} /><ObstacleNumberField label={`Obstacle ${String(index + 1)} Y position`} value={obstacle.y} onCommit={(value) => { onChange(obstacle.id, { y: value }) }} /><ObstacleNumberField label={`Obstacle ${String(index + 1)} width`} value={obstacle.width} minimum={0.05} onCommit={(value) => { onChange(obstacle.id, { width: value }) }} /><ObstacleNumberField label={`Obstacle ${String(index + 1)} height`} value={obstacle.height} minimum={0.05} onCommit={(value) => { onChange(obstacle.id, { height: value }) }} /></div>}</li>)}</ul>}
       {onClear === undefined ? null : <button className="button button--quiet button--full" type="button" disabled={obstacles.length === 0} onClick={onClear}>Clear all obstacles</button>}
     </section>
   )
 }
 
-function InspectorFallback({ selectedSurface, selectedSurfaceEdge, onSurfaceEdgeChange, selectedPanel, settings, settingsScopeLabel, onSettingsChange, placementSummary, onAutoFill, obstacles, draftObstacle, onObstacleRemove, onObstaclesClear }: { readonly selectedSurface?: ShellSurface | null; readonly selectedSurfaceEdge?: ShellSurfaceEdge | null; readonly onSurfaceEdgeChange?: (edge: SurfaceEdgeMetadata | undefined) => void; readonly selectedPanel?: ShellPanel | null; readonly settings?: PanelGroupSettings; readonly settingsScopeLabel?: string; readonly onSettingsChange?: (patch: Partial<PanelGroupSettings>) => void; readonly placementSummary?: PanelPlacementSummary; readonly onAutoFill?: () => void; readonly obstacles?: readonly RectangularObstacle[]; readonly draftObstacle?: RectangularObstacle | null; readonly onObstacleRemove?: (id: string) => void; readonly onObstaclesClear?: () => void }): ReactNode {
+function InspectorFallback({ selectedSurface, selectedSurfaceEdge, onSurfaceEdgeChange, selectedPanel, settings, settingsScopeLabel, onSettingsChange, placementSummary, onAutoFill, obstacles, draftObstacle, onObstacleChange, onObstacleRemove, onObstaclesClear }: { readonly selectedSurface?: ShellSurface | null; readonly selectedSurfaceEdge?: ShellSurfaceEdge | null; readonly onSurfaceEdgeChange?: (edge: SurfaceEdgeMetadata | undefined) => void; readonly selectedPanel?: ShellPanel | null; readonly settings?: PanelGroupSettings; readonly settingsScopeLabel?: string; readonly onSettingsChange?: (patch: Partial<PanelGroupSettings>) => void; readonly placementSummary?: PanelPlacementSummary; readonly onAutoFill?: () => void; readonly obstacles?: readonly RectangularObstacle[]; readonly draftObstacle?: RectangularObstacle | null; readonly onObstacleChange?: (id: string, patch: ObstacleGeometryPatch) => void; readonly onObstacleRemove?: (id: string) => void; readonly onObstaclesClear?: () => void }): ReactNode {
   if (selectedSurface === undefined && selectedPanel === undefined && settings === undefined && placementSummary === undefined && obstacles === undefined) return <EmptySlot label="Inspector" />
   return (
     <div className="inspector-content">
@@ -563,7 +607,7 @@ function InspectorFallback({ selectedSurface, selectedSurfaceEdge, onSurfaceEdge
       {selectedPanel === null ? null : selectedPanel === undefined ? null : <PanelSummary panel={selectedPanel} />}
       {settings === undefined ? null : <SettingsSummary settings={settings} scopeLabel={settingsScopeLabel} onChange={onSettingsChange} />}
       {placementSummary === undefined ? null : <PlacementSummary summary={placementSummary} />}
-      {obstacles === undefined ? null : <ObstacleSummary obstacles={obstacles} draftObstacle={draftObstacle} onRemove={onObstacleRemove} onClear={onObstaclesClear} />}
+      {obstacles === undefined ? null : <ObstacleSummary obstacles={obstacles} draftObstacle={draftObstacle} onChange={onObstacleChange} onRemove={onObstacleRemove} onClear={onObstaclesClear} />}
       {onAutoFill === undefined ? null : <button className="button button--primary button--full" type="button" onClick={onAutoFill}><Sparkles size={15} aria-hidden="true" />Auto-fill surface</button>}
     </div>
   )
@@ -693,6 +737,7 @@ export function Shell({
   draftObstacle,
   onObstacleStart,
   onObstacleCancel,
+  onObstacleChange,
   onObstacleRemove,
   onObstaclesClear,
   onAlignStart,
@@ -704,7 +749,7 @@ export function Shell({
   onLoadSample,
   onImport,
   onImportModel,
-  acceptedImportTypes = '.obj,.mtl,.jpg,.jpeg,.png',
+  acceptedImportTypes = '.zip,.obj,.mtl,.jpg,.jpeg,.png',
   webglAvailable,
   statusMessage: externalStatusMessage,
   className = '',
@@ -1018,7 +1063,7 @@ export function Shell({
             <div className="viewer-overlay viewer-overlay--top-left"><span className="view-status"><span className="view-status__dot" aria-hidden="true" />{cameraMode === '3d' ? 'Perspective' : 'Top-down plan'}</span><span className="view-status view-status--secondary">{renderMode === 'texture' ? 'Textured' : 'Wireframe'}</span></div>
             <div className="viewer-overlay viewer-overlay--top-right viewer-navigation-hint" role="note">Drag to orbit · wheel/pinch to zoom · shift-drag/two fingers to pan</div>
             {onLoadSample !== undefined && projectName === undefined ? <div className="viewer-onboarding" role="note"><p className="eyebrow">Lightweight Demo</p><p>Demo stays in this browser. Use the <strong>Try WebODM sample</strong> action when you want to load a textured house. Nothing downloads until you choose it.</p></div> : null}
-            {activeTool === 'obstacle' ? <div className="viewer-overlay viewer-overlay--bottom-right obstacle-drawing-hint" role="status" aria-live="polite">Drag on the active surface to draw an obstacle (minimum 0.05 m). Press <kbd>Esc</kbd> to cancel.</div> : null}
+            {activeTool === 'obstacle' ? <div className="viewer-overlay viewer-overlay--bottom-right obstacle-drawing-hint" role="status" aria-live="polite">Drag empty surface to draw an obstacle (minimum 0.05 m), or drag an existing obstacle to move it. Press <kbd>Esc</kbd> to cancel.</div> : null}
             {selectedSurface === undefined || selectedSurface === null ? null : <div className="viewer-overlay viewer-overlay--bottom-left"><span className="surface-chip"><span className="surface-chip__swatch" aria-hidden="true" />{selectedSurface.label ?? selectedSurface.id}<span className="surface-chip__muted">· {formatArea(selectedSurface.area)}</span></span></div>}
             <AlignmentBanner stage={alignStage} preview={alignPreview} onConfirm={onAlignConfirm === undefined ? undefined : confirmAlign} onCancel={controlledAlignStage !== undefined && onAlignCancel === undefined ? undefined : cancelAlign} dialogRef={alignDialogRef} />
           </div>
@@ -1029,7 +1074,7 @@ export function Shell({
         {rightPanelOpen ? <button className="inspector-backdrop" type="button" aria-label="Dismiss side panel" onClick={closeRightPanel} /> : null}
         <aside id="workspace-side-panel" className={`inspector-panel${rightPanelOpen ? ' inspector-panel--open' : ''}`} aria-label="Panel library and inspector" aria-hidden={!rightPanelOpen} inert={!rightPanelOpen}>
           <div className="inspector-tabs" role="tablist" aria-orientation="horizontal" aria-label="Workspace side panel"><button ref={panelTabRef} className={`inspector-tab${selectedTab === 'panel' ? ' inspector-tab--active' : ''}`} id="panel-tab" type="button" role="tab" aria-selected={selectedTab === 'panel'} aria-controls="panel-panel" tabIndex={selectedTab === 'panel' ? 0 : -1} onKeyDown={handleInspectorTabKeyDown} onClick={() => { setSelectedTab('panel'); }}><PanelsTopLeft size={15} aria-hidden="true" />Panel</button><button ref={inspectorTabRef} className={`inspector-tab${selectedTab === 'inspector' ? ' inspector-tab--active' : ''}`} id="inspector-tab" type="button" role="tab" aria-selected={selectedTab === 'inspector'} aria-controls="inspector-panel" tabIndex={selectedTab === 'inspector' ? 0 : -1} onKeyDown={handleInspectorTabKeyDown} onClick={() => { setSelectedTab('inspector'); }}><Settings2 size={15} aria-hidden="true" />Inspector</button><button className="inspector-close icon-button icon-button--small" type="button" aria-label="Close side panel" onClick={closeRightPanel}><X size={15} aria-hidden="true" /></button></div>
-          <div className="inspector-panel__body">{selectedTab === 'panel' ? <div id="panel-panel" role="tabpanel" aria-labelledby="panel-tab"><ShellErrorBoundary area="panel library" resetKey={panelSlot ?? `empty-library:${hasImportHandler ? 'ready' : 'disabled'}`}>{panelSlot ?? <EmptySlot label="Panel library" action={hasImportHandler ? 'Import site model' : undefined} onAction={hasImportHandler ? handleImportClick : undefined} />}</ShellErrorBoundary></div> : <div id="inspector-panel" role="tabpanel" aria-labelledby="inspector-tab"><ShellErrorBoundary area="inspector" resetKey={inspector ?? settingsScopeLabel ?? settings ?? selectedSurface ?? selectedSurfaceEdge ?? selectedPanel ?? summary ?? obstacles ?? 'fallback-inspector'}>{inspector ?? <InspectorFallback selectedSurface={selectedSurface} selectedSurfaceEdge={selectedSurfaceEdge} onSurfaceEdgeChange={onSurfaceEdgeChange} selectedPanel={selectedPanel} settings={settings} settingsScopeLabel={settingsScopeLabel} onSettingsChange={onSettingsChange} placementSummary={summary} onAutoFill={onAutoFill} obstacles={obstacles} draftObstacle={draftObstacle} onObstacleRemove={onObstacleRemove} onObstaclesClear={onObstaclesClear} />}</ShellErrorBoundary>{panelStatus === undefined ? null : <div className="panel-status-slot"><ShellErrorBoundary area="panel status" resetKey={panelStatus}>{panelStatus}</ShellErrorBoundary></div>}{panelStatus === undefined && summary === undefined ? null : panelStatus === undefined ? <div className="panel-status-slot"><PlacementSummary summary={summary as PanelPlacementSummary} /></div> : null}</div>}</div>
+          <div className="inspector-panel__body">{selectedTab === 'panel' ? <div id="panel-panel" role="tabpanel" aria-labelledby="panel-tab"><ShellErrorBoundary area="panel library" resetKey={panelSlot ?? `empty-library:${hasImportHandler ? 'ready' : 'disabled'}`}>{panelSlot ?? <EmptySlot label="Panel library" action={hasImportHandler ? 'Import site model' : undefined} onAction={hasImportHandler ? handleImportClick : undefined} />}</ShellErrorBoundary></div> : <div id="inspector-panel" role="tabpanel" aria-labelledby="inspector-tab"><ShellErrorBoundary area="inspector" resetKey={inspector ?? settingsScopeLabel ?? settings ?? selectedSurface ?? selectedSurfaceEdge ?? selectedPanel ?? summary ?? obstacles ?? 'fallback-inspector'}>{inspector ?? <InspectorFallback selectedSurface={selectedSurface} selectedSurfaceEdge={selectedSurfaceEdge} onSurfaceEdgeChange={onSurfaceEdgeChange} selectedPanel={selectedPanel} settings={settings} settingsScopeLabel={settingsScopeLabel} onSettingsChange={onSettingsChange} placementSummary={summary} onAutoFill={onAutoFill} obstacles={obstacles} draftObstacle={draftObstacle} onObstacleChange={onObstacleChange} onObstacleRemove={onObstacleRemove} onObstaclesClear={onObstaclesClear} />}</ShellErrorBoundary>{panelStatus === undefined ? null : <div className="panel-status-slot"><ShellErrorBoundary area="panel status" resetKey={panelStatus}>{panelStatus}</ShellErrorBoundary></div>}{panelStatus === undefined && summary === undefined ? null : panelStatus === undefined ? <div className="panel-status-slot"><PlacementSummary summary={summary as PanelPlacementSummary} /></div> : null}</div>}</div>
         </aside>
         {!rightPanelOpen ? <button ref={reopenInspectorRef} className="reopen-inspector" type="button" aria-controls="workspace-side-panel" aria-expanded={rightPanelOpen} onClick={() => { setRightPanelOpen(true); }}><PanelTop size={15} aria-hidden="true" />Open panel</button> : null}
       </div>

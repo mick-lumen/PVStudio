@@ -1,9 +1,11 @@
+import { strToU8, zipSync } from 'fflate'
 import { describe, expect, it } from 'vitest'
 import { createSurfaceDescriptor } from '../core'
 import { PANEL_CATALOG } from '../data'
 import { createPlacementStore } from '../placement'
 import {
   buildViewerSourceFromFiles,
+  buildViewerSourceFromSelection,
   CATALOG_PANEL_DEFINITIONS,
   createPanelVisuals,
   formatSurfaceLabel,
@@ -38,6 +40,7 @@ describe('app integration adapters', () => {
     expect(result.ok).toBe(true)
     if (!result.ok) return
     expect(result.source).toMatchObject({ obj, mtl, name: 'site.obj' })
+    expect(result.source.upAxis).toBe('auto')
     expect(result.source.textures).toEqual([texture])
   })
 
@@ -54,6 +57,42 @@ describe('app integration adapters', () => {
       expect(duplicateObj.message).toMatch(/multiple OBJ/i)
       expect(duplicateMtl.message).toMatch(/multiple MTL/i)
     }
+  })
+
+  it('opens a WebODM ZIP, ignores its optional conf, and normalises nested resources', async () => {
+    const bytes = zipSync({
+      'survey/odm_textured_model_geo.obj': strToU8('mtllib odm_textured_model_geo.mtl\nv 0 0 0\n'),
+      'survey/odm_textured_model_geo.mtl': strToU8('newmtl roof\nmap_Kd roof.png\n'),
+      'survey/roof.png': new Uint8Array([137, 80, 78, 71]),
+      'survey/odm_textured_model_geo.conf': strToU8('ignored=true'),
+    })
+    const archive = new File([bytes], 'survey.zip', { type: 'application/zip', lastModified: 123 })
+    const result = await buildViewerSourceFromSelection([archive])
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.obj.name).toBe('odm_textured_model_geo.obj')
+    const material = result.source.mtl
+    expect(material).toBeInstanceOf(File)
+    if (!(material instanceof File)) return
+    expect(material.name).toBe('odm_textured_model_geo.mtl')
+    expect(result.source.textures?.map((texture) => texture instanceof File ? texture.name : texture)).toEqual(['roof.png'])
+    expect(result.source.upAxis).toBe('auto')
+  })
+
+  it('rejects ambiguous ZIP selections and duplicate resource basenames', async () => {
+    const archive = new File([zipSync({
+      'a/site.obj': strToU8('v 0 0 0'),
+      'a/roof.png': new Uint8Array([1]),
+      'b/ROOF.PNG': new Uint8Array([2]),
+    })], 'site.zip', { type: 'application/zip' })
+    const mixed = await buildViewerSourceFromSelection([archive, new File(['v'], 'site.obj')])
+    const duplicate = await buildViewerSourceFromSelection([archive])
+    expect(mixed).toEqual({
+      ok: false,
+      message: 'Choose one ZIP archive by itself, or select the extracted OBJ/MTL/textures together.',
+    })
+    expect(duplicate.ok).toBe(false)
+    if (!duplicate.ok) expect(duplicate.message).toMatch(/duplicate model resource name/i)
   })
 
   it('keeps catalogue visual metadata at the rendering boundary', () => {

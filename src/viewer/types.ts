@@ -23,6 +23,9 @@ export type ViewerSurfaceInteractionMode = 'select' | 'place' | 'obstacle'
 /** A URL or a browser file supplied to the OBJ/MTL loader. */
 export type ViewerResource = File | string
 
+/** Vertical axis used by source OBJ coordinates before viewer normalisation. */
+export type ViewerModelUpAxis = 'auto' | 'y' | 'z'
+
 /**
  * Files making up a photogrammetry model. Texture files are optional because
  * an OBJ is still useful without an MTL or texture atlas.
@@ -33,6 +36,12 @@ export interface ViewerModelSource {
   readonly textures?: readonly ViewerResource[]
   /** Friendly name shown in metadata and error messages. */
   readonly name?: string
+  /**
+   * Source vertical axis. `auto` compares the Y/Z extents, which correctly
+   * distinguishes conventional Y-up models from OpenDroneMap/WebODM Z-up
+   * exports. Ambiguous models remain Y-up for backwards compatibility.
+   */
+  readonly upAxis?: ViewerModelUpAxis
 }
 
 export interface ViewerBoundingBox {
@@ -82,7 +91,7 @@ export interface ViewerLoadProgress {
   readonly url?: string
 }
 
-export type ViewerLoadPhase = 'reading' | 'parsing' | 'materials' | 'textures' | 'finalising' | 'complete'
+export type ViewerLoadPhase = 'reading' | 'parsing' | 'materials' | 'textures' | 'finalising' | 'indexing' | 'describing' | 'complete'
 
 /** Canonical plain selection DTO shared with placement and core contracts. */
 export type ViewerSurfaceSelection = SurfaceSelection

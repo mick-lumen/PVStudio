@@ -532,7 +532,7 @@
       <section class="section" aria-labelledby="workstreams-heading">
         <div class="section-heading">
           <h2 id="workstreams-heading">Core workstreams</h2>
-          <p>Updated 09 Aug 2026 · Europe/Dublin</p>
+          <p>Updated 11 Aug 2026 · Europe/Dublin</p>
         </div>
         <div class="surface workstreams">
           <article class="workstream">
@@ -595,13 +595,35 @@
           </ul>
           <div class="fixture-status" aria-label="Fixture verification status">
             <span class="state state--ready">Local parser and integrity tests passed · 7/7</span>
-            <span class="state state--ready">Production desktop/mobile browser flows passed · 10/10</span>
+            <span class="state state--ready">Production desktop/mobile browser flows passed · 13/13</span>
           </div>
           <p>
             The workspace exposes “Try sample” to load these URLs through the production Viewer
             path without a file picker. The public mobile smoke check confirmed the OBJ, MTL, and
             three JPEG maps loaded, rendered, and reported the metadata above in the production
             browser flow.
+          </p>
+        </div>
+        <div class="surface fixture-card">
+          <div>
+            <h3>Ballinasloe Business &amp; Technology Park survey</h3>
+            <p>
+              The user-supplied real WebODM acceptance archive contains a 37,599,008-byte OBJ,
+              its 9,996-byte MTL, and all 51 referenced PNG texture maps. The production import
+              path reads the ZIP directly as well as its extracted folder, resolves every
+              material dependency, and builds 51 textured meshes from 309,226 polygons.
+            </p>
+          </div>
+          <div class="fixture-status" aria-label="Real survey verification status">
+            <span class="state state--ready">Direct ZIP and extracted-folder browser imports passed</span>
+            <span class="state state--ready">857 selectable design surfaces · 0 invalid descriptors</span>
+            <span class="state state--ready">113 panel-viable surfaces · 8 large faces at or above 200 m²</span>
+          </div>
+          <p>
+            This private acceptance survey is not redistributed from the public site. It is used
+            as the real-world release gate alongside the checked-in synthetic stress fixture, so
+            both dependency-complete photogrammetry imports and million-triangle behavior are
+            exercised without publishing customer-supplied imagery.
           </p>
         </div>
       </section>
@@ -632,8 +654,8 @@
             <h3>Luna tester <span>verification</span></h3>
             <p>Run the complete quality gates and report reproducible failures.</p>
             <ul>
-              <li>37 files · 284 tests, typecheck, lint, and production build pass</li>
-              <li>10 production-browser flows pass across desktop Chromium and Pixel 7 emulation</li>
+              <li>39 files · 309 tests, typecheck, lint, and production build pass</li>
+              <li>13 production-browser flows pass across desktop Chromium and Pixel 7 emulation</li>
               <li>Fixture validator reports 7/7 integrity checks</li>
             </ul>
           </article>
@@ -649,7 +671,7 @@
           <div class="gate" role="listitem">
             <strong>Component tests</strong>
             <small>Vitest + Testing Library</small>
-            <div class="gate-status gate-status--ready">37 files · 284 tests passed</div>
+            <div class="gate-status gate-status--ready">39 files · 309 tests passed</div>
           </div>
           <div class="gate" role="listitem">
             <strong>Strict typecheck</strong>
@@ -669,7 +691,7 @@
           <div class="gate" role="listitem">
             <strong>Browser smoke</strong>
             <small>End-to-end workspace flow</small>
-            <div class="gate-status gate-status--ready">10/10 production flows passed</div>
+            <div class="gate-status gate-status--ready">13/13 production flows passed</div>
           </div>
           <div class="gate" role="listitem">
             <strong>Accessibility</strong>

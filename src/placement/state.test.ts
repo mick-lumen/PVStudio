@@ -73,6 +73,8 @@ describe('PlacementStore manual placement and selection', () => {
     expect(store.updateManualPlacement({ x: 2, y: 2 })).toBe(true)
     const placement = store.commitManualPlacement()
     expect(placement?.localCenter).toEqual({ x: 2, y: 2 })
+    expect(placement?.groupId).toBe('group-1')
+    expect(editableGroupIdFor(store.getState())).toBe('group-1')
     expect(store.getState().manualPlacement).toBeUndefined()
     expect(store.beginManualPlacement({ panelId: panel.id })).toBe(true)
     expect(store.updateManualPlacement({ x: Number.NaN, y: 0 })).toBe(false)
@@ -159,7 +161,7 @@ describe('PlacementStore manual placement and selection', () => {
     expect(store.getState().placements).toEqual({})
   })
 
-  it('updates obstacle validation without history loss and rejects malformed or unknown sources', () => {
+  it('records obstacle validation changes in chronological undo/redo history and rejects malformed sources', () => {
     const store = makeStore()
     const existing = store.addPanel({ panelId: panel.id, surfaceId: 'roof', localCenter: { x: 2, y: 2 }, id: 'existing' })
     expect(existing).toBeDefined()
@@ -172,7 +174,7 @@ describe('PlacementStore manual placement and selection', () => {
       roof: [{ id: 'roof-block', x: 0, y: 0, width: 10, height: 5 }],
     }
     expect(store.setObstacles(source)).toBe(true)
-    expect(store.getState().undoDepth).toBe(undoDepth)
+    expect(store.getState().undoDepth).toBe(undoDepth + 1)
     expect(store.getSnapshot()).not.toBe(before)
     const stored = store.context.obstacles as Readonly<Record<string, readonly RectangularObstacle[]>>
     expect(stored.roof?.[0]).toEqual(source.roof?.[0])
@@ -193,9 +195,20 @@ describe('PlacementStore manual placement and selection', () => {
     expect(store.setObstacles({ missing: [] })).toBe(false)
     expect(store.setObstacles({ roof: [{ id: 'bad', x: 0, y: 0, width: 0, height: 1 }] })).toBe(false)
     expect(notifications).toBe(2)
+
+    // The most recent design edit is the obstacle annotation, so undoing it
+    // restores placement validation without removing the existing panel.
+    expect(store.undo()).toBe(true)
+    expect(store.getState().placements.existing).toBeDefined()
+    expect(store.context.obstacles).toBeUndefined()
+    expect(store.redo()).toBe(true)
+    expect(store.context.obstacles as unknown).toEqual(stored)
+    expect(store.getState().placements.existing).toBeDefined()
+
+    expect(store.undo()).toBe(true)
     expect(store.undo()).toBe(true)
     expect(store.getState().placements).toEqual({})
-    expect(store.context.obstacles as unknown).toEqual(stored)
+    expect(store.context.obstacles).toBeUndefined()
   })
 
   it('uses the current obstacle context for manual, move/group, array, orientation and alignment collision checks', () => {

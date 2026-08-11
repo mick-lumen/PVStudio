@@ -4,7 +4,7 @@ import { computeViewerMetadataAsync } from './metadata'
 import { parseObjDocumentAsync, type ObjDocumentBounds, type ObjDocumentSourceCounts, type ParsedObjDocument } from './objParser'
 import { disposeViewerObject } from './renderMode'
 import type { LoadedViewerModel } from './internalTypes'
-import type { ViewerLoadPhase, ViewerLoadProgress, ViewerModelSource, ViewerResource, ViewerSourceMetadata } from './types'
+import type { ViewerLoadPhase, ViewerLoadProgress, ViewerModelSource, ViewerModelUpAxis, ViewerResource, ViewerSourceMetadata } from './types'
 
 export interface ViewerLoadOptions {
   readonly signal?: AbortSignal
@@ -20,6 +20,71 @@ export interface ViewerLoadOptions {
 export interface ViewerResourceRegistry {
   readonly resolve: (url: string) => string
   readonly dispose: () => void
+}
+
+const AUTO_UP_AXIS_RATIO = 0.6
+
+const canonicalCoordinate = (value: number): number => Object.is(value, -0) ? 0 : value
+
+const axisExtent = (bounds: ObjDocumentBounds, axis: 'y' | 'z'): number => Math.max(0, bounds.max[axis] - bounds.min[axis])
+
+/**
+ * Resolve the source vertical axis without making ambiguous OBJ files rotate.
+ * Photogrammetry site models have a much smaller height extent than either
+ * horizontal extent: WebODM writes that height to Z, while conventional Three
+ * content writes it to Y.
+ */
+export function resolveViewerModelUpAxis(upAxis: ViewerModelUpAxis | undefined, bounds: ObjDocumentBounds): Exclude<ViewerModelUpAxis, 'auto'> {
+  if (upAxis === 'y' || upAxis === 'z') return upAxis
+  const yExtent = axisExtent(bounds, 'y')
+  const zExtent = axisExtent(bounds, 'z')
+  if (zExtent > 0 && zExtent < yExtent * AUTO_UP_AXIS_RATIO) return 'z'
+  return 'y'
+}
+
+const transformUpAxisPoint = (point: ObjDocumentBounds['min'], upAxis: 'y' | 'z'): ObjDocumentBounds['min'] => upAxis === 'z'
+  ? { x: point.x, y: point.z, z: canonicalCoordinate(-point.y) }
+  : { x: point.x, y: point.y, z: point.z }
+
+/** Convert an OBJ-local box to the viewer's canonical Y-up coordinate space. */
+export function transformViewerBounds(bounds: ObjDocumentBounds, upAxis: 'y' | 'z'): ObjDocumentBounds {
+  const corners = [
+    { x: bounds.min.x, y: bounds.min.y, z: bounds.min.z },
+    { x: bounds.min.x, y: bounds.min.y, z: bounds.max.z },
+    { x: bounds.min.x, y: bounds.max.y, z: bounds.min.z },
+    { x: bounds.min.x, y: bounds.max.y, z: bounds.max.z },
+    { x: bounds.max.x, y: bounds.min.y, z: bounds.min.z },
+    { x: bounds.max.x, y: bounds.min.y, z: bounds.max.z },
+    { x: bounds.max.x, y: bounds.max.y, z: bounds.min.z },
+    { x: bounds.max.x, y: bounds.max.y, z: bounds.max.z },
+  ].map((corner) => transformUpAxisPoint(corner, upAxis))
+  return {
+    min: {
+      x: Math.min(...corners.map((corner) => corner.x)),
+      y: Math.min(...corners.map((corner) => corner.y)),
+      z: Math.min(...corners.map((corner) => corner.z)),
+    },
+    max: {
+      x: Math.max(...corners.map((corner) => corner.x)),
+      y: Math.max(...corners.map((corner) => corner.y)),
+      z: Math.max(...corners.map((corner) => corner.z)),
+    },
+  }
+}
+
+/** Apply the resolved source axis to a built object before metadata or picking. */
+export function applyViewerModelUpAxis(object: THREE.Group, upAxis: 'y' | 'z'): void {
+  if (upAxis === 'z') {
+    // Surface indexing intentionally removes the model root's matrix so an
+    // external normalisation parent cannot change model-local placement DTOs.
+    // Keeping the WebODM correction on that root would therefore rotate the
+    // visible meshes but be cancelled from surface normals and boundaries.
+    // Premultiply each top-level content transform instead: rendering,
+    // raycasting, metadata, and surface analysis then share one Y-up frame.
+    const zUpToYUp = new THREE.Matrix4().makeRotationX(-Math.PI / 2)
+    for (const child of object.children) child.applyMatrix4(zUpToYUp)
+  }
+  object.updateMatrixWorld(true)
 }
 
 function isFileResource(resource: ViewerResource): resource is File {
@@ -115,17 +180,55 @@ async function readResource(resource: ViewerResource, options: ViewerLoadOptions
   return response.text()
 }
 
+function isGzipResource(resource: ViewerResource): boolean {
+  if (isFileResource(resource)) return resource.name.toLowerCase().endsWith('.gz')
+  if (isInlineDocument(resource, '.obj')) return false
+  try {
+    return new URL(resource, browserDocumentBaseUrl()).pathname.toLowerCase().endsWith('.gz')
+  } catch {
+    return resource.split(/[?#]/, 1)[0]?.toLowerCase().endsWith('.gz') ?? false
+  }
+}
+
+function hasGzipMagic(bytes: ArrayBuffer): boolean {
+  if (bytes.byteLength < 2) return false
+  const header = new Uint8Array(bytes, 0, 2)
+  return header[0] === 0x1f && header[1] === 0x8b
+}
+
+/**
+ * Expand gzip-compressed model bytes while retaining the byte-oriented parser
+ * path. HTTP clients transparently decode responses carrying
+ * `Content-Encoding: gzip`, even when the URL still ends in `.gz`, so plain
+ * bytes are intentionally returned unchanged.
+ */
+export async function decompressGzipBytes(bytes: ArrayBuffer): Promise<ArrayBuffer> {
+  if (!hasGzipMagic(bytes)) return bytes
+  if (typeof DecompressionStream === 'undefined') {
+    throw new Error('This browser cannot decompress the bundled sample model')
+  }
+  const compressedStream = new Response(bytes).body
+  if (compressedStream === null) throw new Error('Unable to read the compressed sample model')
+  const stream = compressedStream.pipeThrough(new DecompressionStream('gzip'))
+  return new Response(stream).arrayBuffer()
+}
+
 /** Reads OBJ bytes without first materialising a duplicate JavaScript string. */
 async function readResourceBytes(resource: ViewerResource, options: ViewerLoadOptions, extension: string): Promise<ArrayBuffer> {
   if (options.signal?.aborted) throw new DOMException('Model loading was cancelled', 'AbortError')
-  if (isFileResource(resource)) return resource.arrayBuffer()
+  if (isFileResource(resource)) {
+    const bytes = await resource.arrayBuffer()
+    return isGzipResource(resource) ? decompressGzipBytes(bytes) : bytes
+  }
   if (isInlineDocument(resource, extension)) {
     const encoded = new TextEncoder().encode(resource)
     return encoded.buffer.slice(encoded.byteOffset, encoded.byteOffset + encoded.byteLength)
   }
   const response = await fetch(resource, { signal: options.signal })
   if (!response.ok) throw new Error(`Unable to read model resource (${String(response.status)} ${response.statusText})`)
-  return response.arrayBuffer()
+  const bytes = await response.arrayBuffer()
+  if (options.signal?.aborted) throw new DOMException('Model loading was cancelled', 'AbortError')
+  return isGzipResource(resource) ? decompressGzipBytes(bytes) : bytes
 }
 
 function progressReporter(options: ViewerLoadOptions): (phase: ViewerLoadPhase, progress: number, itemsLoaded?: number, itemsTotal?: number, url?: string) => void {
@@ -908,6 +1011,13 @@ export function buildViewerObject(parsed: ParsedObjDocument, materials: ReturnTy
         const tupleGeometry = buildIndexedTupleGeometry(parsed, group, hasUv, hasNormal)
         geometry.setAttribute('position', new THREE.BufferAttribute(tupleGeometry.positions, 3))
         geometry.setIndex(new THREE.BufferAttribute(tupleGeometry.indices, 1))
+        // Tuple indices preserve render seams, not OBJ position identity: the
+        // same physical endpoint can occur more than once when UVs or normals
+        // split across adjacent faces. Surface grouping must therefore join
+        // endpoints by coordinate instead of treating tuple indices as unique
+        // positions. Keep that distinction explicit on the geometry so normal
+        // indexed meshes retain the faster source-index path.
+        geometry.userData.surfaceVertexIdentity = 'coordinate'
         if (tupleGeometry.uvs !== undefined) geometry.setAttribute('uv', new THREE.BufferAttribute(tupleGeometry.uvs, 2))
         if (tupleGeometry.normals !== undefined) geometry.setAttribute('normal', new THREE.BufferAttribute(tupleGeometry.normals, 3))
         if (tupleGeometry.normals === undefined && faceCount <= MAX_SYNC_NORMAL_FACES) geometry.computeVertexNormals()
@@ -967,7 +1077,8 @@ export async function loadViewerModel(source: ViewerModelSource, options: Viewer
     const parsed = await parseObjOffThread(inlineObj ?? objBytes ?? new ArrayBuffer(0), options.signal)
     const object = buildViewerObject(parsed, materials, source.name ?? resourceName(source.obj, 'Site model'))
     builtObject = object
-    object.updateMatrixWorld(true)
+    const resolvedUpAxis = resolveViewerModelUpAxis(source.upAxis, parsed.referencedBounds ?? parsed.bounds)
+    applyViewerModelUpAxis(object, resolvedUpAxis)
     let disposed = false
     const dispose = (): void => {
       if (disposed) return
@@ -982,7 +1093,7 @@ export async function loadViewerModel(source: ViewerModelSource, options: Viewer
     disposeBuiltObject = dispose
     report('finalising', 0.94, 1, 1)
     if (options.signal?.aborted) throw new DOMException('Model loading was cancelled', 'AbortError')
-    options.onObjectReady?.(object, dispose, parsed.referencedBounds ?? parsed.bounds)
+    options.onObjectReady?.(object, dispose, transformViewerBounds(parsed.referencedBounds ?? parsed.bounds, resolvedUpAxis))
     const metadata = await computeViewerMetadataAsync(object, source.name ?? resourceName(source.obj, 'Site model'), false, {
       signal: options.signal,
       chunkSize: 4_096,

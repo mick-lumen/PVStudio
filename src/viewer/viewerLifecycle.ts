@@ -11,7 +11,7 @@ export interface ViewerSurfaceAnalysisHooks {
   readonly buildIndex: () => Promise<ViewerSurfaceIndex>
   readonly buildDescriptors: (index: ViewerSurfaceIndex) => Promise<readonly SurfaceDescriptor[]>
   readonly onReady: (index: ViewerSurfaceIndex, surfaces: readonly SurfaceDescriptor[]) => void
-  readonly onProgress: (phase: 'started' | 'complete') => void
+  readonly onProgress: (phase: 'started' | 'indexed' | 'complete') => void
 }
 
 /**
@@ -25,6 +25,7 @@ export async function runViewerSurfaceAnalysis(hooks: ViewerSurfaceAnalysisHooks
   try {
     const index = await hooks.buildIndex()
     if (!hooks.isActive()) return
+    hooks.onProgress('indexed')
     const surfaces = await hooks.buildDescriptors(index)
     if (!hooks.isActive()) return
     hooks.onReady(index, surfaces)

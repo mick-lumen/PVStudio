@@ -1,3 +1,4 @@
+import { unzip, type Unzipped } from 'fflate'
 import type {
   PanelDefinition,
   PanelPlacement,
@@ -115,9 +116,112 @@ export type ViewerImportResult =
   | { readonly ok: true; readonly source: ViewerModelSource; readonly obj: File }
   | { readonly ok: false; readonly message: string }
 
+const MAX_ZIP_BYTES = 1_073_741_824
+const MAX_ZIP_ENTRIES = 4_096
+const MAX_ZIP_EXPANDED_BYTES = 2_147_483_648
+const MODEL_FILE_EXTENSIONS = new Set(['obj', 'mtl', 'jpg', 'jpeg', 'png'])
+
 const fileExtension = (file: File): string => {
   const dot = file.name.lastIndexOf('.')
   return dot < 0 ? '' : file.name.slice(dot + 1).toLowerCase()
+}
+
+const archiveEntryExtension = (name: string): string => {
+  const dot = name.lastIndexOf('.')
+  return dot < 0 ? '' : name.slice(dot + 1).toLowerCase()
+}
+
+const archiveEntryBasename = (name: string): string => name.replaceAll('\\', '/').split('/').at(-1) ?? ''
+
+const mediaTypeForExtension = (extension: string): string => {
+  switch (extension) {
+    case 'obj': return 'model/obj'
+    case 'mtl': return 'model/mtl'
+    case 'jpg':
+    case 'jpeg': return 'image/jpeg'
+    case 'png': return 'image/png'
+    default: return 'application/octet-stream'
+  }
+}
+
+function unzipArchive(file: File): Promise<Unzipped> {
+  const bufferPromise = typeof file.arrayBuffer === 'function'
+    ? file.arrayBuffer()
+    : new Promise<ArrayBuffer>((resolve, reject) => {
+        const reader = new FileReader()
+        reader.onerror = () => {
+          reject(reader.error ?? new Error('Unable to read ZIP archive.'))
+        }
+        reader.onload = () => {
+          if (reader.result instanceof ArrayBuffer) resolve(reader.result)
+          else reject(new Error('ZIP archive did not produce binary data.'))
+        }
+        reader.readAsArrayBuffer(file)
+      })
+  return bufferPromise.then((buffer) => new Promise<Unzipped>((resolve, reject) => {
+    let entryCount = 0
+    let expandedBytes = 0
+    let limitError: string | undefined
+    unzip(new Uint8Array(buffer), {
+      filter: (entry) => {
+        entryCount += 1
+        expandedBytes += entry.originalSize
+        if (entryCount > MAX_ZIP_ENTRIES) limitError = `ZIP contains more than ${String(MAX_ZIP_ENTRIES)} entries.`
+        if (expandedBytes > MAX_ZIP_EXPANDED_BYTES) limitError = 'ZIP expands beyond the 2 GB safety limit.'
+        return limitError === undefined && MODEL_FILE_EXTENSIONS.has(archiveEntryExtension(entry.name))
+      },
+    }, (error, result) => {
+      if (limitError !== undefined) reject(new Error(limitError))
+      else if (error !== null) reject(error)
+      else resolve(result)
+    })
+  }))
+}
+
+async function buildViewerSourceFromZip(file: File): Promise<ViewerImportResult> {
+  if (file.size > MAX_ZIP_BYTES) return { ok: false, message: 'ZIP exceeds the 1 GB compressed-file safety limit.' }
+  let entries: Unzipped
+  try {
+    entries = await unzipArchive(file)
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : 'unknown archive error'
+    return { ok: false, message: `Unable to open ZIP: ${detail}` }
+  }
+
+  const files: File[] = []
+  const basenames = new Set<string>()
+  for (const [path, bytes] of Object.entries(entries)) {
+    const name = archiveEntryBasename(path)
+    const extension = archiveEntryExtension(name)
+    if (name.length === 0 || !MODEL_FILE_EXTENSIONS.has(extension)) continue
+    const key = name.toLowerCase()
+    if (basenames.has(key)) {
+      return { ok: false, message: `ZIP contains duplicate model resource name: ${name}` }
+    }
+    basenames.add(key)
+    const exactBytes = new Uint8Array(bytes)
+    files.push(new File([exactBytes.buffer], name, {
+      type: mediaTypeForExtension(extension),
+      lastModified: file.lastModified,
+    }))
+  }
+  return buildViewerSourceFromFiles(files)
+}
+
+/**
+ * Accept either one WebODM ZIP or the traditional extracted OBJ/MTL/texture
+ * selection. ZIP expansion uses fflate's asynchronous worker path so a large
+ * survey does not synchronously freeze the viewer thread.
+ */
+export async function buildViewerSourceFromSelection(files: readonly File[]): Promise<ViewerImportResult> {
+  const archives = files.filter((file) => fileExtension(file) === 'zip')
+  if (archives.length === 0) return buildViewerSourceFromFiles(files)
+  if (archives.length > 1 || files.length !== 1) {
+    return { ok: false, message: 'Choose one ZIP archive by itself, or select the extracted OBJ/MTL/textures together.' }
+  }
+  const archive = archives[0]
+  if (archive === undefined) return { ok: false, message: 'Choose a ZIP archive to import.' }
+  return buildViewerSourceFromZip(archive)
 }
 
 /**
@@ -147,6 +251,7 @@ export function buildViewerSourceFromFiles(files: readonly File[]): ViewerImport
     ...(mtl === undefined ? {} : { mtl }),
     ...(textures.length === 0 ? {} : { textures: Object.freeze([...textures]) }),
     name: obj.name,
+    upAxis: 'auto',
   }
   return { ok: true, source, obj }
 }

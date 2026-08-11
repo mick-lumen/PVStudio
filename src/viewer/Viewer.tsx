@@ -14,7 +14,6 @@ import {
 import { createDemoViewerModel } from './demoScene'
 import { cameraNorthAngleDegrees, computeViewerFrame, computeViewerFrameFromBounds, createViewerOrthographicFrustum, fitViewerCamera, perspectiveWorldUnitsPerPixel } from './framing'
 import { loadViewerModel } from './modelLoader'
-import type { ObjDocumentBounds } from './objParser'
 import { cancelViewerPointers, createViewerPointerTracker, type ViewerPointerTracker } from './pointerTracker'
 import { applyViewerRenderMode } from './renderMode'
 import { createViewerCanvasConfig } from './canvasConfig'
@@ -44,11 +43,18 @@ import type {
 } from './types'
 import type { LoadedViewerModel } from './internalTypes'
 
+// A full panel footprint is larger than this. Keeping sub-square-metre
+// photogrammetry shards visible but out of the interactive index prevents a
+// noisy survey mesh from publishing tens of thousands of unusable patches.
+const MINIMUM_DESIGN_SURFACE_AREA_M2 = 1
+
 interface ViewerModelState {
   readonly loaded: LoadedViewerModel
-  /** Surface analysis is published asynchronously after the model is visible. */
+  /** The model and its design-surface index are published atomically. */
   readonly index: ViewerSurfaceIndex | null
   readonly frame: ReturnType<typeof computeViewerFrame>
+  /** Number of placement-ready surfaces published with the model. */
+  readonly surfaceCount: number
 }
 
 interface ViewerSceneProps {
@@ -108,69 +114,6 @@ function isViewerLoadActive(active: boolean, signal: AbortSignal): boolean {
   return active && !signal.aborted
 }
 
-interface ViewerPreviewMesh extends THREE.Object3D {
-  readonly geometry: THREE.BufferGeometry
-  readonly material: THREE.Material | THREE.Material[]
-}
-
-interface ViewerPreviewMaterial extends THREE.Material {
-  readonly map?: THREE.Texture | null
-}
-
-function isViewerPreviewMesh(child: THREE.Object3D): child is ViewerPreviewMesh {
-  return child instanceof THREE.Mesh
-}
-
-function isViewerPreviewMaterial(material: THREE.Material): material is ViewerPreviewMaterial {
-  return 'map' in material
-}
-
-function viewerPreviewMaterialList(material: ViewerPreviewMesh['material']): readonly THREE.Material[] {
-  return Array.isArray(material) ? material : [material]
-}
-
-/**
- * Build metadata that is cheap enough for the first render. Geometry counts
- * and material references are available from the built object; only the
- * expensive per-vertex metadata pass is deferred by the loader.
- */
-function createViewerPreviewMetadata(object: THREE.Group, frame: ReturnType<typeof computeViewerFrame>, name: string): ViewerModelMetadata {
-  const materials = new Set<THREE.Material>()
-  const textures = new Set<THREE.Texture>()
-  let vertexCount = 0
-  let polygonCount = 0
-  let meshCount = 0
-  object.traverse((child) => {
-    if (!isViewerPreviewMesh(child)) return
-    meshCount += 1
-    const position = child.geometry.getAttribute('position')
-    const index = child.geometry.getIndex()
-    vertexCount += position.count
-    polygonCount += Math.floor((index?.count ?? position.count) / 3)
-    for (const material of viewerPreviewMaterialList(child.material)) {
-      materials.add(material)
-      if (isViewerPreviewMaterial(material) && material.map instanceof THREE.Texture) textures.add(material.map)
-    }
-  })
-  const halfSize = frame.size.clone().multiplyScalar(0.5)
-  const min = frame.center.clone().sub(halfSize)
-  const max = frame.center.clone().add(halfSize)
-  return {
-    name,
-    vertexCount,
-    polygonCount,
-    meshCount,
-    materialCount: materials.size,
-    textureCount: textures.size,
-    boundingBox: {
-      min: { x: min.x, y: min.y, z: min.z },
-      max: { x: max.x, y: max.y, z: max.z },
-      size: { x: frame.size.x, y: frame.size.y, z: frame.size.z },
-    },
-    isDemo: false,
-  }
-}
-
 function formatEta(progress: ViewerLoadProgress): string {
   if (progress.etaMs === undefined || !Number.isFinite(progress.etaMs)) return 'Preparing…'
   const seconds = Math.max(1, Math.ceil(progress.etaMs / 1000))
@@ -184,6 +127,8 @@ function progressLabel(progress: ViewerLoadProgress): string {
     case 'materials': return 'Preparing materials'
     case 'textures': return 'Loading textures'
     case 'finalising': return 'Fitting site to view'
+    case 'indexing': return 'Finding design surfaces'
+    case 'describing': return 'Preparing design surfaces'
     case 'complete': return 'Model ready'
     default: return 'Loading model'
   }
@@ -213,7 +158,7 @@ function ModelStatus({ progress, error }: { progress: ViewerLoadProgress | null;
   )
 }
 
-function MetadataOverlay({ metadata }: { metadata: ViewerModelMetadata }): ReactNode {
+function MetadataOverlay({ metadata, surfaceCount }: { metadata: ViewerModelMetadata; surfaceCount: number }): ReactNode {
   return (
     <details open style={{ ...overlayStyle, top: 12, left: 12, maxWidth: 220, pointerEvents: 'auto' }}>
       <summary style={{ cursor: 'pointer', padding: '6px 9px', borderRadius: 8, background: 'rgba(255,255,255,.86)', boxShadow: '0 2px 12px rgba(20,40,38,.08)' }}>
@@ -223,6 +168,7 @@ function MetadataOverlay({ metadata }: { metadata: ViewerModelMetadata }): React
         <div>{metadata.vertexCount.toLocaleString()} vertices</div>
         <div>{metadata.polygonCount.toLocaleString()} polygons</div>
         <div>{metadata.meshCount.toLocaleString()} meshes</div>
+        <div>{surfaceCount.toLocaleString()} design surfaces</div>
         <div>{metadata.boundingBox.size.x.toFixed(1)} × {metadata.boundingBox.size.z.toFixed(1)} m</div>
       </div>
     </details>
@@ -858,18 +804,18 @@ export function Viewer(props: ViewerProps): ReactNode {
   useEffect(() => {
     let active = true
     let owned: LoadedViewerModel | undefined
-    let pendingObject: THREE.Group | undefined
     const controller = new AbortController()
     // The loader effect owns the previous model lifecycle, so clear stale state before the replacement resolves.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     resetViewerState(source === null ? null : { progress: 0, itemsLoaded: 0, itemsTotal: 1, phase: 'reading' })
     callbacksRef.current.onSurfacesChange?.([])
-    const reportSurfaceProgress = (nextProgress: number): void => {
+    const reportSurfaceProgress = (phase: 'started' | 'indexed' | 'complete'): void => {
+      const nextProgress = phase === 'complete' ? 1 : phase === 'indexed' ? 0.98 : 0.95
       const next: ViewerLoadProgress = {
         progress: nextProgress,
         itemsLoaded: nextProgress >= 1 ? 1 : 0,
         itemsTotal: 1,
-        phase: nextProgress >= 1 ? 'complete' : 'finalising',
+        phase: phase === 'complete' ? 'complete' : phase === 'indexed' ? 'describing' : 'indexing',
       }
       setProgress(next)
       callbacksRef.current.onLoadProgress?.(next)
@@ -879,53 +825,49 @@ export function Viewer(props: ViewerProps): ReactNode {
         loaded.dispose()
         return
       }
-      // Publish the parsed object immediately. Surface analysis is deliberately
-      // a second, abortable phase so a large model can render while its hit
-      // index/descriptors are built in cooperative chunks.
+      // Analyse before rendering. Uploading a photogrammetry scene containing
+      // hundreds of thousands of textured faces can starve main-thread design
+      // preparation on constrained GPUs. Publishing the object and surface
+      // index together guarantees that a visible model is immediately usable.
       owned = loaded
-      setModel({ loaded, index: null, frame: computeViewerFrameFromBounds(loaded.metadata.boundingBox) })
-      callbacksRef.current.onModelLoaded?.(loaded.metadata)
       try {
+        let publishedIndex: ViewerSurfaceIndex | undefined
         await runViewerSurfaceAnalysis({
           isActive: () => isViewerLoadActive(active, controller.signal),
-          buildIndex: () => createViewerSurfaceIndexAsync(loaded.object, loaded.object.uuid, undefined, { signal: controller.signal, chunkSize: 2560 }),
+          buildIndex: () => createViewerSurfaceIndexAsync(loaded.object, loaded.object.uuid, undefined, {
+            signal: controller.signal,
+            chunkSize: 2560,
+            minimumSurfaceAreaM2: MINIMUM_DESIGN_SURFACE_AREA_M2,
+            deferRaycastGrids: true,
+          }),
           buildDescriptors: (index) => index.surfaceDescriptorsAsync({ signal: controller.signal, chunkSize: 2560 }),
           onReady: (index, surfaces) => {
-            setModel((current) => current?.loaded === loaded ? { ...current, index } : current)
+            publishedIndex = index
+            setModel({ loaded, index, frame: computeViewerFrameFromBounds(loaded.metadata.boundingBox), surfaceCount: surfaces.length })
+            callbacksRef.current.onModelLoaded?.(loaded.metadata)
             callbacksRef.current.onSurfacesChange?.(surfaces)
           },
-          onProgress: (phase) => { reportSurfaceProgress(phase === 'complete' ? 1 : 0.92) },
+          onProgress: reportSurfaceProgress,
         })
+        if (publishedIndex !== undefined && isViewerLoadActive(active, controller.signal)) {
+          try {
+            await publishedIndex.prepareRaycastGridsAsync({ signal: controller.signal, chunkSize: 2560 })
+          } catch {
+            // Acceleration is optional: the published packed index retains a
+            // correct face-scan fallback if background grid preparation is
+            // aborted or cannot complete on a constrained device.
+          }
+        }
       } catch (cause: unknown) {
         if (!isViewerLoadActive(active, controller.signal)) return
-        // A post-render analysis failure still owns the parsed object. Dispose
-        // it before surfacing the error so texture/material resources cannot
-        // leak through a failed descriptor publication.
+        // Surface analysis owns the parsed object until atomic publication.
+        // Dispose it before surfacing the error so texture/material resources
+        // cannot leak through a failed descriptor publication.
         if (owned === loaded) owned = undefined
         loaded.dispose()
-        setModel((current) => current?.loaded === loaded ? null : current)
         callbacksRef.current.onSurfacesChange?.([])
         throw cause
       }
-    }
-    const onObjectReady = (object: THREE.Group, dispose: () => void, bounds: ObjDocumentBounds): void => {
-      if (!active || controller.signal.aborted) {
-        dispose()
-        return
-      }
-      pendingObject = object
-      const frame = computeViewerFrameFromBounds({
-        min: bounds.min,
-        max: bounds.max,
-        size: {
-          x: bounds.max.x - bounds.min.x,
-          y: bounds.max.y - bounds.min.y,
-          z: bounds.max.z - bounds.min.z,
-        },
-      })
-      const metadata = createViewerPreviewMetadata(object, frame, source?.name ?? 'Site model')
-      const provisional: LoadedViewerModel = { object, metadata, dispose }
-      setModel({ loaded: provisional, index: null, frame })
     }
     if (source === null) {
       void publish(createDemoViewerModel()).catch((cause: unknown) => {
@@ -935,11 +877,10 @@ export function Viewer(props: ViewerProps): ReactNode {
         callbacksRef.current.onError?.(nextError)
       })
     } else {
-      void loadViewerModel(source, { signal: controller.signal, onObjectReady, onProgress: (next) => { if (active) { setProgress(next); callbacksRef.current.onLoadProgress?.(next) } } })
+      void loadViewerModel(source, { signal: controller.signal, onProgress: (next) => { if (active) { setProgress(next); callbacksRef.current.onLoadProgress?.(next) } } })
         .then(publish)
         .catch((cause: unknown) => {
           if (!active || (cause instanceof DOMException && cause.name === 'AbortError')) return
-          if (pendingObject !== undefined) setModel((current) => current?.loaded.object === pendingObject ? null : current)
           const nextError = cause instanceof Error ? cause : new Error(String(cause))
           setError(nextError)
           callbacksRef.current.onError?.(nextError)
@@ -986,11 +927,11 @@ export function Viewer(props: ViewerProps): ReactNode {
     return <div className={`pv-viewer ${className ?? ''}`.trim()} style={mergedStyle} role="alert" aria-label="WebGL unavailable">WebGL is unavailable in this browser. Enable hardware acceleration to view the site model.</div>
   }
   return (
-    <div className={`pv-viewer ${className ?? ''}`.trim()} style={mergedStyle} aria-label={ariaLabel} data-testid="pv-viewer">
+    <div className={`pv-viewer ${className ?? ''}`.trim()} style={mergedStyle} aria-label={ariaLabel} data-testid="pv-viewer" data-surface-count={model?.surfaceCount ?? 0}>
       <Canvas className="pv-viewer__canvas" {...createViewerCanvasConfig(typeof window === 'undefined' ? 1 : window.devicePixelRatio)} shadows={shadows} gl={{ antialias: true, alpha: false, powerPreference: 'high-performance' }} onPointerMissed={clearSelection}>
         {model !== null && <ViewerScene model={model} progress={progress} cameraMode={cameraMode} renderMode={renderMode} surfaceInteractionMode={surfaceInteractionMode} surfaceGestureActive={surfaceGestureActive} showGrid={showGrid} sceneContent={<>{sceneContent}{children}</>} shadows={shadows} selected={selected} onSurfaceHit={handleSurfaceHit} onSurfacePointer={handleSurfacePointer} onSurfaceMiss={clearSelection} onCameraMetrics={setCameraMetrics} />}
       </Canvas>
-      {model !== null && <MetadataOverlay metadata={model.loaded.metadata} />}
+      {model !== null && <MetadataOverlay metadata={model.loaded.metadata} surfaceCount={model.surfaceCount} />}
       <ViewModeButtons cameraMode={cameraMode} renderMode={renderMode} onCameraModeChange={setCameraMode} onRenderModeChange={setRenderMode} />
       {showCompass && <CompassOverlay northAngleDeg={cameraMetrics?.northAngleDeg ?? 0} />}
       {showScale && model !== null && <ScaleOverlay metrics={cameraMetrics} />}

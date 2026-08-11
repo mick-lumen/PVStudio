@@ -7,9 +7,13 @@ import {
   createViewerHighlightGeometry,
   createViewerSurfaceIndex,
   estimateViewerSurfaceIndexBytes,
+  isSimpleSurfaceBoundary,
+  largestSimpleSurfaceBoundary,
   raycastViewerSurface,
   selectionFromViewerIntersection,
+  tracePlanarSurfaceBoundaryLoops,
 } from './surfaceSelection'
+import { applyViewerModelUpAxis } from './modelLoader'
 import { toViewerSurfaceModelPoint } from './surfacePointer'
 
 function makePlanarMesh(): THREE.Mesh {
@@ -34,6 +38,34 @@ function makeUnindexedPlanarMesh(): THREE.Mesh {
     0, 0, 0, 1, 0, 1, 0, 0, 1,
     3, 0, 0, 4, 0, 0, 4, 0, 1,
   ], 3))
+  return new THREE.Mesh(geometry, new THREE.MeshBasicMaterial())
+}
+
+function makeTupleSeamedPlanarMesh(): THREE.Mesh {
+  // Adjacent faces share physical endpoints but use different render vertices,
+  // as an OBJ does when UV or normal indices split across the diagonal.
+  const geometry = new THREE.BufferGeometry()
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute([
+    0, 0, 0, 1, 0, 1, 1, 0, 0,
+    0, 0, 0, 0, 0, 1, 1, 0, 1,
+  ], 3))
+  geometry.setIndex([0, 1, 2, 3, 4, 5])
+  geometry.userData.surfaceVertexIdentity = 'coordinate'
+  return new THREE.Mesh(geometry, new THREE.MeshBasicMaterial())
+}
+
+function makeTranslatedShallowHingeMesh(translationX: number): THREE.Mesh {
+  // The faces share an edge and differ by a hundredth of a degree. Their local geometry
+  // is identical regardless of translation, so surface grouping must be too.
+  const rise = Math.tan(THREE.MathUtils.degToRad(0.01))
+  const geometry = new THREE.BufferGeometry()
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute([
+    translationX, 0, 0,
+    translationX + 1, 0, 0,
+    translationX + 1, 0, 1,
+    translationX, rise, 1,
+  ], 3))
+  geometry.setIndex([0, 2, 1, 0, 3, 2])
   return new THREE.Mesh(geometry, new THREE.MeshBasicMaterial())
 }
 
@@ -110,6 +142,113 @@ function polygonArea(points: readonly { readonly x: number; readonly y: number }
 }
 
 describe('viewer surface indexing', () => {
+  it('indexes Z-up WebODM roof geometry in the same canonical frame that is rendered', async () => {
+    const geometry = new THREE.BufferGeometry()
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute([
+      0, 0, 0,
+      4, 0, 0,
+      4, 3, 0,
+      0, 3, 0,
+    ], 3))
+    geometry.setIndex([0, 1, 2, 0, 2, 3])
+    const material = new THREE.MeshBasicMaterial()
+    const mesh = new THREE.Mesh(geometry, material)
+    const root = new THREE.Group()
+    root.add(mesh)
+
+    try {
+      applyViewerModelUpAxis(root, 'z')
+      const index = await createViewerSurfaceIndexAsync(root, 'z-up-roof', undefined, {
+        chunkSize: 1,
+        minimumSurfaceAreaM2: 1,
+      })
+      const descriptors = await index.surfaceDescriptorsAsync({ chunkSize: 1 })
+      const descriptor = descriptors[0]
+
+      expect(root.rotation.x).toBeCloseTo(0)
+      expect(mesh.rotation.x).toBeCloseTo(-Math.PI / 2)
+      expect(descriptor).toBeDefined()
+      expect(descriptor?.area).toBeCloseTo(12)
+      expect(descriptor?.tiltDeg).toBeCloseTo(0)
+      expect(descriptor?.frame.normal.y).toBeCloseTo(1)
+      if (descriptor !== undefined && 'points' in descriptor.region) {
+        expect(polygonArea(descriptor.region.points)).toBeCloseTo(12)
+      }
+
+      const hit = index.raycastRawRay(new THREE.Ray(
+        new THREE.Vector3(2, 5, -1.5),
+        new THREE.Vector3(0, -1, 0),
+      ))
+      expect(hit).not.toBeNull()
+      const selection = hit === null ? null : index.selectionForIntersection({
+        object: hit.mesh,
+        faceIndex: hit.faceIndex,
+        point: hit.point,
+      })
+      expect(selection?.selection.surface.id).toBe(descriptor?.id)
+      expect(selection?.selection.worldPoint.y).toBeCloseTo(0)
+    } finally {
+      geometry.dispose()
+      material.dispose()
+    }
+  })
+
+  it('rejects self-intersecting photogrammetry boundaries and selects the largest simple loop', () => {
+    const bowTie = [
+      { x: 0, y: 0 },
+      { x: 2, y: 2 },
+      { x: 0, y: 2 },
+      { x: 2, y: 0 },
+    ]
+    const small = [
+      { x: 0, y: 0 },
+      { x: 1, y: 0 },
+      { x: 0, y: 1 },
+    ]
+    const large = [
+      { x: 0, y: 0 },
+      { x: 3, y: 0 },
+      { x: 3, y: 2 },
+      { x: 0, y: 2 },
+    ]
+
+    expect(isSimpleSurfaceBoundary(bowTie)).toBe(false)
+    expect(isSimpleSurfaceBoundary(large)).toBe(true)
+    expect(largestSimpleSurfaceBoundary([bowTie, small, large])).toEqual(large)
+    expect(largestSimpleSurfaceBoundary([bowTie])).toBeUndefined()
+  })
+
+  it('recovers the largest truthful loop at a branching photogrammetry boundary vertex', () => {
+    const vertices = new Map([
+      [0, { x: 0, y: 0 }],
+      [1, { x: 2, y: 0 }],
+      [2, { x: 2, y: 2 }],
+      [3, { x: 0, y: 2 }],
+      [4, { x: -3, y: 0 }],
+      [5, { x: -3, y: -3 }],
+      [6, { x: 0, y: -3 }],
+    ])
+    const adjacency = new Map<number, Set<number>>()
+    const addEdge = (first: number, second: number): void => {
+      const firstNeighbours = adjacency.get(first) ?? new Set<number>()
+      const secondNeighbours = adjacency.get(second) ?? new Set<number>()
+      firstNeighbours.add(second)
+      secondNeighbours.add(first)
+      adjacency.set(first, firstNeighbours)
+      adjacency.set(second, secondNeighbours)
+    }
+    for (const [first, second] of [
+      [0, 1], [1, 2], [2, 3], [3, 0],
+      [0, 4], [4, 5], [5, 6], [6, 0],
+    ] as const) addEdge(first, second)
+
+    const loops = tracePlanarSurfaceBoundaryLoops(adjacency, vertices)
+    const simpleAreas = loops.filter(isSimpleSurfaceBoundary).map(polygonArea).sort((first, second) => first - second)
+
+    expect(simpleAreas).toEqual([4, 9])
+    expect(largestSimpleSurfaceBoundary(loops)).toSatisfy((loop: readonly { x: number; y: number }[]) => polygonArea(loop) === 9)
+  })
+
   it('groups connected coplanar triangles but keeps disconnected patches separate', () => {
     const mesh = makePlanarMesh()
     const groups = buildViewerSurfaceGroups(mesh)
@@ -119,6 +258,70 @@ describe('viewer surface indexing', () => {
     expect(groups[1]?.faceIndices).toEqual([2])
     expect(groups[0]?.area).toBeCloseTo(1)
     expect(groups[1]?.area).toBeCloseTo(0.5)
+  })
+
+  it('keeps microscopic photogrammetry fragments out of the interactive design index', async () => {
+    const mesh = makePlanarMesh()
+    try {
+      const index = await createViewerSurfaceIndexAsync(mesh, 'design-sized-surfaces', undefined, {
+        chunkSize: 1,
+        minimumSurfaceAreaM2: 0.75,
+      })
+
+      expect(index.groupsFor(mesh).map((group) => group.area)).toEqual([1])
+      await expect(index.surfaceDescriptorsAsync({ chunkSize: 1 })).resolves.toHaveLength(1)
+      expect(index.selectionForIntersection({
+        object: mesh,
+        faceIndex: 2,
+        point: new THREE.Vector3(3.25, 0, 0.25),
+      })).toBeNull()
+      expect(index.raycastRawRay(new THREE.Ray(
+        new THREE.Vector3(3.25, 2, 0.25),
+        new THREE.Vector3(0, -1, 0),
+      ))).toBeNull()
+    } finally {
+      mesh.geometry.dispose()
+      ;(mesh.material as THREE.Material).dispose()
+    }
+  })
+
+  it('publishes a correct index before optional raycast grids finish', async () => {
+    const mesh = makeIndexedGridMesh(20, 20)
+    try {
+      const index = await createViewerSurfaceIndexAsync(mesh, 'deferred-grid', undefined, {
+        chunkSize: 64,
+        deferRaycastGrids: true,
+      })
+
+      await expect(index.surfaceDescriptorsAsync({ chunkSize: 64 })).resolves.toHaveLength(1)
+      expect(index.raycastRawRay(new THREE.Ray(
+        new THREE.Vector3(1, 2, 1),
+        new THREE.Vector3(0, -1, 0),
+      ))).not.toBeNull()
+
+      const channelSpy = vi.spyOn(globalThis, 'MessageChannel')
+      await index.prepareRaycastGridsAsync({ chunkSize: 64 })
+      expect(channelSpy).toHaveBeenCalled()
+      channelSpy.mockClear()
+      await index.prepareRaycastGridsAsync({ chunkSize: 64 })
+      expect(channelSpy).not.toHaveBeenCalled()
+      channelSpy.mockRestore()
+    } finally {
+      mesh.geometry.dispose()
+      ;(mesh.material as THREE.Material).dispose()
+    }
+  })
+
+  it('rejects an invalid minimum design-surface area', async () => {
+    const mesh = makePlanarMesh()
+    try {
+      await expect(createViewerSurfaceIndexAsync(mesh, 'invalid-area', undefined, {
+        minimumSurfaceAreaM2: Number.NaN,
+      })).rejects.toThrow('minimumSurfaceAreaM2')
+    } finally {
+      mesh.geometry.dispose()
+      ;(mesh.material as THREE.Material).dispose()
+    }
   })
 
   it('keeps indexed source vertices equivalent to the unindexed coordinate fallback', async () => {
@@ -137,6 +340,34 @@ describe('viewer surface indexing', () => {
       unindexed.geometry.dispose()
       ;(indexed.material as THREE.Material).dispose()
       ;(unindexed.material as THREE.Material).dispose()
+    }
+  })
+
+  it('joins indexed OBJ faces across UV and normal tuple seams', async () => {
+    const mesh = makeTupleSeamedPlanarMesh()
+    try {
+      expect(buildViewerSurfaceGroups(mesh)).toHaveLength(1)
+      const index = await createViewerSurfaceIndexAsync(mesh, 'tuple-seam', undefined, { chunkSize: 1 })
+      expect(index.groupsFor(mesh)).toHaveLength(1)
+      expect(index.groupsFor(mesh)[0]?.faceIndices).toEqual([0, 1])
+    } finally {
+      mesh.geometry.dispose()
+      ;(mesh.material as THREE.Material).dispose()
+    }
+  })
+
+  it('groups shallow adjacent faces independently of their world-origin distance', () => {
+    const local = makeTranslatedShallowHingeMesh(0)
+    const georeferenced = makeTranslatedShallowHingeMesh(100_000)
+    try {
+      expect(buildViewerSurfaceGroups(local)).toHaveLength(1)
+      expect(buildViewerSurfaceGroups(georeferenced)).toHaveLength(1)
+      expect(buildViewerSurfaceGroups(georeferenced)[0]?.faceIndices).toEqual([0, 1])
+    } finally {
+      local.geometry.dispose()
+      georeferenced.geometry.dispose()
+      ;(local.material as THREE.Material).dispose()
+      ;(georeferenced.material as THREE.Material).dispose()
     }
   })
 
@@ -332,6 +563,45 @@ describe('viewer surface indexing', () => {
     expect(hit).not.toBeNull()
     if (hit === null || !('points' in hit.selection.surface.region)) return
     expect(hit.selection.surface.region.points).toHaveLength(4)
+  })
+
+  it('reconstructs a roof boundary where a perimeter edge is shared with a wall', async () => {
+    const geometry = new THREE.BufferGeometry()
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute([
+      0, 2, 0,
+      4, 2, 0,
+      4, 2, 3,
+      0, 2, 3,
+      4, 0, 0,
+      0, 0, 0,
+    ], 3))
+    // The roof's 0-1 edge is also part of the wall. It is not an exterior
+    // mesh edge, but it is an exterior edge of the roof placement surface.
+    geometry.setIndex([
+      0, 2, 1,
+      0, 3, 2,
+      0, 1, 4,
+      0, 4, 5,
+    ])
+    const material = new THREE.MeshBasicMaterial()
+    const mesh = new THREE.Mesh(geometry, material)
+
+    try {
+      const index = createViewerSurfaceIndex(mesh)
+      const descriptors = await index.surfaceDescriptorsAsync({ chunkSize: 1 })
+      const roof = descriptors.find((descriptor) => Math.abs(descriptor.area - 12) < 1e-6)
+
+      expect(roof).toBeDefined()
+      expect(roof?.frame.normal.y).toBeCloseTo(1)
+      expect(roof !== undefined && 'points' in roof.region).toBe(true)
+      if (roof !== undefined && 'points' in roof.region) {
+        expect(roof.region.points).toHaveLength(4)
+        expect(polygonArea(roof.region.points)).toBeCloseTo(12)
+      }
+    } finally {
+      geometry.dispose()
+      material.dispose()
+    }
   })
 
   it('returns a concave polygon rather than an enclosing AABB', () => {
@@ -531,7 +801,7 @@ describe('viewer surface indexing', () => {
   it('materialises boundary descriptors cooperatively and caches the result', async () => {
     const mesh = makeConcaveMesh()
     const index = createViewerSurfaceIndex(mesh)
-    const timeoutSpy = vi.spyOn(globalThis, 'setTimeout')
+    const channelSpy = vi.spyOn(globalThis, 'MessageChannel')
     try {
       const first = await index.surfaceDescriptorsAsync({ chunkSize: 1 })
       const second = await index.surfaceDescriptorsAsync({ chunkSize: 1 })
@@ -539,9 +809,9 @@ describe('viewer surface indexing', () => {
       expect(first).toHaveLength(1)
       const region = first[0]?.region
       expect(region && 'points' in region ? region.points : []).toHaveLength(6)
-      expect(timeoutSpy).toHaveBeenCalled()
+      expect(channelSpy).toHaveBeenCalled()
     } finally {
-      timeoutSpy.mockRestore()
+      channelSpy.mockRestore()
       mesh.geometry.dispose()
       ;(mesh.material as THREE.Material).dispose()
     }
@@ -666,6 +936,10 @@ describe('viewer surface indexing', () => {
       camera.updateMatrixWorld(true)
       const raycaster = new THREE.Raycaster()
       const threeFaceScan = vi.spyOn(raycaster, 'intersectObject')
+      // Design interaction is enabled only after descriptor publication. Keep
+      // one-time boundary/descriptor construction outside the pointer budget,
+      // matching the Viewer lifecycle used in production.
+      await index.surfaceDescriptorsAsync({ chunkSize: 1_024 })
       const started = performance.now()
       const hit = raycastViewerSurface(mesh, raycaster, new THREE.Vector2(0, 0), camera, index)
       const elapsed = performance.now() - started
@@ -702,16 +976,16 @@ describe('viewer surface indexing', () => {
     geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
     const material = new THREE.MeshBasicMaterial()
     const mesh = new THREE.Mesh(geometry, material)
-    const timeoutSpy = vi.spyOn(globalThis, 'setTimeout')
+    const channelSpy = vi.spyOn(globalThis, 'MessageChannel')
     const started = performance.now()
     try {
       const index = await createViewerSurfaceIndexAsync(mesh, 'large-synthetic', undefined, { chunkSize: 256 })
       expect(index.modelId).toBe('large-synthetic')
       expect(index.groupsFor(mesh)).toHaveLength(triangleCount)
-      expect(timeoutSpy).toHaveBeenCalled()
+      expect(channelSpy).toHaveBeenCalled()
       expect(performance.now() - started).toBeLessThan(5_000)
     } finally {
-      timeoutSpy.mockRestore()
+      channelSpy.mockRestore()
       geometry.dispose()
       material.dispose()
     }

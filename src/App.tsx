@@ -39,13 +39,14 @@ import {
   type ShellPanel,
   type ShellSurface,
   type ShellSurfaceEdge,
+  type ObstacleGeometryPatch,
   type ToolId,
   type ViewMode,
   type RenderMode,
 } from './shell/Shell'
 import {
   createPanelVisuals,
-  buildViewerSourceFromFiles,
+  buildViewerSourceFromSelection,
   placementValues,
   summarisePlacementState,
   toShellPanel,
@@ -177,13 +178,26 @@ interface ActiveSurfaceBox {
   readonly additive: boolean
 }
 
-interface ActiveObstacleDrag {
+interface ActiveObstacleDraw {
+  readonly mode: 'draw'
   readonly pointerId: number
   readonly surfaceId: string
   readonly startPoint: Point2
   lastPoint: Point2
   moved: boolean
 }
+
+interface ActiveObstacleMove {
+  readonly mode: 'move'
+  readonly pointerId: number
+  readonly surfaceId: string
+  readonly startPoint: Point2
+  readonly obstacle: RectangularObstacle
+  lastPoint: Point2
+  moved: boolean
+}
+
+type ActiveObstacleDrag = ActiveObstacleDraw | ActiveObstacleMove
 
 type ObstacleMap = Readonly<Record<string, readonly RectangularObstacle[]>>
 
@@ -207,6 +221,23 @@ const obstacleFromPoints = (id: string, first: Point2, second: Point2): Rectangu
   id,
   ...regionFromPoints(first, second),
 })
+
+const obstacleContainsPoint = (obstacle: RectangularObstacle, point: Point2): boolean =>
+  point.x >= obstacle.x
+  && point.x <= obstacle.x + obstacle.width
+  && point.y >= obstacle.y
+  && point.y <= obstacle.y + obstacle.height
+
+const movedObstacle = (obstacle: RectangularObstacle, start: Point2, current: Point2): RectangularObstacle => ({
+  ...obstacle,
+  x: obstacle.x + current.x - start.x,
+  y: obstacle.y + current.y - start.y,
+})
+
+const obstacleMapFromSource = (source: unknown): ObstacleMap => {
+  if (source === undefined || Array.isArray(source) || typeof source !== 'object' || source === null) return EMPTY_OBSTACLES
+  return source as ObstacleMap
+}
 
 const surfaceIdsFromEvent = (selection: SurfaceSelection, event?: ViewerSurfaceSelectEvent): readonly string[] =>
   event?.selectedSurfaceIds.length === 0 || event?.selectedSurfaceIds === undefined
@@ -277,6 +308,7 @@ export function App({
   const activeObstacleDrag = useRef<ActiveObstacleDrag | null>(null)
   const obstaclesBySurfaceRef = useRef<ObstacleMap>(EMPTY_OBSTACLES)
   const obstacleIdRef = useRef(0)
+  const importSequenceRef = useRef(0)
   const previousControlledSource = useRef<ViewerModelSource | null | undefined>(controlledSource)
   const [draggingPlacementIds, setDraggingPlacementIds] = useState<readonly string[]>([])
   const [dragStartPoint, setDragStartPoint] = useState<Point2 | null>(null)
@@ -300,12 +332,23 @@ export function App({
     setObstaclesBySurface(next)
   }, [store])
 
+  // Placement undo/redo owns obstacle history. Mirror its canonical obstacle
+  // snapshot back into React state so the canvas and inspector travel through
+  // the same chronology as panel placement changes.
+  useEffect(() => {
+    const next = obstacleMapFromSource(store.context.obstacles)
+    if (obstaclesBySurfaceRef.current === next) return
+    obstaclesBySurfaceRef.current = next
+    setObstaclesBySurface(next)
+  }, [placementState, store])
+
   // A controlled model replacement invalidates the previous surface topology
   // and its placements. Clear the topology eagerly so a stale callback from
   // the replaced viewer cannot be mistaken for the new model's surfaces.
   useEffect(() => {
     if (previousControlledSource.current === controlledSource) return
     previousControlledSource.current = controlledSource
+    importSequenceRef.current += 1
     surfacesRef.current = []
     setSurfaces([])
     setModelMetadata(null)
@@ -488,6 +531,28 @@ export function App({
     if (changed) replaceObstacleMap(Object.freeze(next))
   }, [replaceObstacleMap])
 
+  const handleObstacleChange = useCallback((id: string, patch: ObstacleGeometryPatch): void => {
+    const values = Object.values(patch)
+    if (values.some((value) => !Number.isFinite(value))) return
+    if ((patch.width !== undefined && patch.width < SURFACE_DRAG_THRESHOLD_M)
+      || (patch.height !== undefined && patch.height < SURFACE_DRAG_THRESHOLD_M)) return
+    const current = obstaclesBySurfaceRef.current
+    let changed = false
+    const next: Record<string, readonly RectangularObstacle[]> = {}
+    for (const [surfaceId, obstacles] of Object.entries(current)) {
+      const updated = obstacles.map((obstacle) => {
+        if (obstacle.id !== id) return obstacle
+        const candidate = Object.freeze({ ...obstacle, ...patch })
+        if (candidate.x === obstacle.x && candidate.y === obstacle.y
+          && candidate.width === obstacle.width && candidate.height === obstacle.height) return obstacle
+        return candidate
+      })
+      if (updated.some((obstacle, index) => obstacle !== obstacles[index])) changed = true
+      next[surfaceId] = Object.freeze(updated)
+    }
+    if (changed) replaceObstacleMap(Object.freeze(next))
+  }, [replaceObstacleMap])
+
   const handleObstaclesClear = useCallback((): void => {
     replaceObstacleMap(EMPTY_OBSTACLES)
   }, [replaceObstacleMap])
@@ -508,19 +573,19 @@ export function App({
       const active = activeObstacleDrag.current
       if (event.phase === 'down') {
         if (event.selection === null) return
-        activeObstacleDrag.current = {
-          pointerId: event.pointerId,
-          surfaceId: event.selection.surface.id,
-          startPoint: event.selection.hitLocal,
-          lastPoint: event.selection.hitLocal,
-          moved: false,
-        }
+        const surfaceId = event.selection.surface.id
+        const startPoint = event.selection.hitLocal
+        const existing = obstaclesBySurfaceRef.current[surfaceId] ?? EMPTY_OBSTACLE_LIST
+        const hitObstacle = [...existing].reverse().find((obstacle) => obstacleContainsPoint(obstacle, startPoint))
+        activeObstacleDrag.current = hitObstacle === undefined
+          ? { mode: 'draw', pointerId: event.pointerId, surfaceId, startPoint, lastPoint: startPoint, moved: false }
+          : { mode: 'move', pointerId: event.pointerId, surfaceId, startPoint, obstacle: hitObstacle, lastPoint: startPoint, moved: false }
         store.cancelManualPlacement()
         store.cancelArrayDrag()
         store.cancelAutoFill()
-        store.setActiveSurface(event.selection.surface.id)
+        store.setActiveSurface(surfaceId)
         setDraftObstacle(null)
-        setDraftObstacleSurfaceId(event.selection.surface.id)
+        setDraftObstacleSurfaceId(surfaceId)
         return
       }
       if (active === null || active.pointerId !== event.pointerId) return
@@ -528,7 +593,9 @@ export function App({
         active.lastPoint = event.selection.hitLocal
         if (!active.moved && pointsDiffer(active.startPoint, event.selection.hitLocal)) active.moved = true
         if (active.moved) {
-          setDraftObstacle(obstacleFromPoints(`draft:${active.surfaceId}`, active.startPoint, event.selection.hitLocal))
+          setDraftObstacle(active.mode === 'move'
+            ? movedObstacle(active.obstacle, active.startPoint, event.selection.hitLocal)
+            : obstacleFromPoints(`draft:${active.surfaceId}`, active.startPoint, event.selection.hitLocal))
           setDraftObstacleSurfaceId(active.surfaceId)
         }
       }
@@ -538,14 +605,19 @@ export function App({
         : active.lastPoint
       const valid = event.phase === 'up' && active.moved && pointsDiffer(active.startPoint, finalPoint)
       if (valid) {
-        const obstacle = Object.freeze(obstacleFromPoints(
-          `${active.surfaceId}:obstacle:${String(++obstacleIdRef.current)}`,
-          active.startPoint,
-          finalPoint,
-        ))
-        const current = obstaclesBySurfaceRef.current
-        const existing = current[active.surfaceId] ?? EMPTY_OBSTACLE_LIST
-        replaceObstacleMap(Object.freeze({ ...current, [active.surfaceId]: Object.freeze([...existing, obstacle]) }))
+        if (active.mode === 'move') {
+          const moved = movedObstacle(active.obstacle, active.startPoint, finalPoint)
+          handleObstacleChange(active.obstacle.id, { x: moved.x, y: moved.y })
+        } else {
+          const obstacle = Object.freeze(obstacleFromPoints(
+            `${active.surfaceId}:obstacle:${String(++obstacleIdRef.current)}`,
+            active.startPoint,
+            finalPoint,
+          ))
+          const current = obstaclesBySurfaceRef.current
+          const existing = current[active.surfaceId] ?? EMPTY_OBSTACLE_LIST
+          replaceObstacleMap(Object.freeze({ ...current, [active.surfaceId]: Object.freeze([...existing, obstacle]) }))
+        }
       }
       clearObstacleDraft()
       return
@@ -672,7 +744,7 @@ export function App({
       }
       store.setActiveSurface(box.surfaceId)
     }
-  }, [activeTool, changeTool, clearObstacleDraft, clearSurfaceBox, editableGroupId, editableSettings, obstaclesBySurface, panelSpecs, replaceObstacleMap, selectedPanelId, store, surfaceGestureActive])
+  }, [activeTool, changeTool, clearObstacleDraft, clearSurfaceBox, editableGroupId, editableSettings, handleObstacleChange, obstaclesBySurface, panelSpecs, replaceObstacleMap, selectedPanelId, store, surfaceGestureActive])
 
   const pointerSurface = useCallback((placement: PanelPlacement): SurfaceDescriptor | undefined =>
     surfaces.find((surface) => surface.id === placement.surfaceId), [surfaces])
@@ -726,8 +798,16 @@ export function App({
     if (delta.x !== 0 || delta.y !== 0) store.moveGroup(active.placementIds, delta)
   }, [pointerSurface, store])
 
-  const handleImportFiles = useCallback((files: readonly File[]): void => {
-    const result = buildViewerSourceFromFiles(files)
+  const handleImportFiles = useCallback(async (files: readonly File[]): Promise<void> => {
+    const sequence = importSequenceRef.current + 1
+    importSequenceRef.current = sequence
+    const openingZip = files.length === 1 && files[0]?.name.toLowerCase().endsWith('.zip') === true
+    if (openingZip) {
+      setLoadError(null)
+      setImportNotice(`Opening ${files[0]?.name ?? 'ZIP archive'}…`)
+    }
+    const result = await buildViewerSourceFromSelection(files)
+    if (sequence !== importSequenceRef.current) return
     if (!result.ok) {
       setLoadError(result.message)
       setImportNotice(null)
@@ -742,10 +822,14 @@ export function App({
   }, [resetModelPlacementContext])
 
   const handleImport = useCallback((file: File): void => {
-    handleImportFiles([file])
+    void handleImportFiles([file])
+  }, [handleImportFiles])
+  const handleImportFilesRequest = useCallback((files: readonly File[]): void => {
+    void handleImportFiles(files)
   }, [handleImportFiles])
 
   const handleLoadSample = useCallback((): void => {
+    importSequenceRef.current += 1
     const sampleSource = createSampleViewerSource()
     setLocalSource(sampleSource)
     setModelMetadata(null)
@@ -979,15 +1063,16 @@ export function App({
       draftObstacle={draftObstacle}
       onObstacleStart={activeSurface === undefined ? undefined : handleObstacleStart}
       onObstacleCancel={handleObstacleCancel}
+      onObstacleChange={handleObstacleChange}
       onObstacleRemove={handleObstacleRemove}
       onObstaclesClear={handleObstaclesClear}
       onAlignStart={canAlign ? handleAlignStart : undefined}
       onAlignConfirm={placementState.align.enabled ? handleAlignConfirm : undefined}
       onAlignCancel={placementState.align.enabled ? handleAlignCancel : undefined}
       onImport={handleImport}
-      onImportFiles={handleImportFiles}
+      onImportFiles={handleImportFilesRequest}
       onLoadSample={handleLoadSample}
-      acceptedImportTypes=".obj,.mtl,.jpg,.jpeg,.png"
+      acceptedImportTypes=".zip,.obj,.mtl,.jpg,.jpeg,.png"
       webglAvailable={webglAvailable}
       statusMessage={statusMessage}
       initialCameraMode={initialCameraMode}

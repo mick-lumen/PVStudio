@@ -140,6 +140,11 @@ vi.mock('./viewer', () => {
         emitPointer(props, pointer('up', 8, 4))
       }}>Draw obstacle</button>
       <button type="button" onClick={() => {
+        emitPointer(props, pointer('down', 1, 1))
+        emitPointer(props, pointer('move', 3, 2))
+        emitPointer(props, pointer('up', 3, 2))
+      }}>Move obstacle</button>
+      <button type="button" onClick={() => {
         emitPointer(props, pointer('down', 2, 2))
         emitPointer(props, pointer('move', 2.02, 2.02))
         emitPointer(props, pointer('up', 2.02, 2.02))
@@ -328,15 +333,15 @@ describe('App', () => {
     expect(shellRenderControls.getByRole('button', { name: 'Texture' })).toHaveAttribute('aria-pressed', 'true')
   })
 
-  it('announces a selected import source through the controlled shell boundary', () => {
+  it('announces a selected import source through the controlled shell boundary', async () => {
     render(<App webglAvailable={false} />)
     const input = screen.getByLabelText('Import site model')
     const file = new File(['v 0 0 0'], 'site.obj', { type: 'text/plain' })
     fireEvent.change(input, { target: { files: [file] } })
-    expect(screen.getByText('Loaded site.obj')).toBeInTheDocument()
+    await waitFor(() => { expect(screen.getByText('Loaded site.obj')).toBeInTheDocument() })
   })
 
-  it('passes an OBJ, MTL, and texture bundle to the viewer source boundary', () => {
+  it('passes an OBJ, MTL, and texture bundle to the viewer source boundary', async () => {
     render(<App webglAvailable />)
     const input = screen.getByLabelText('Import site model')
     const obj = new File(['v 0 0 0'], 'site.obj', { type: 'text/plain' })
@@ -345,8 +350,10 @@ describe('App', () => {
 
     fireEvent.change(input, { target: { files: [obj, mtl, texture] } })
 
-    expect(screen.getByTestId('mock-source')).toHaveTextContent('site.obj|site.mtl|roof.PNG')
-    expect(screen.getByText('Loaded site.obj')).toBeInTheDocument()
+    await waitFor(() => {
+      expect(screen.getByTestId('mock-source')).toHaveTextContent('site.obj|site.mtl|roof.PNG')
+      expect(screen.getByText('Loaded site.obj')).toBeInTheDocument()
+    })
   })
 
   it('loads the checked-in WebODM fixture through the real URL source without opening the picker', () => {
@@ -576,10 +583,10 @@ describe('App', () => {
     fireEvent.click(screen.getByRole('button', { name: /^Obstacle/ }))
     fireEvent.click(screen.getByRole('button', { name: 'Draft obstacle' }))
     fireEvent.click(screen.getByRole('tab', { name: 'Inspector' }))
-    expect(screen.getByText('Drawing obstacle · 4.00 × 2.00 m')).toBeInTheDocument()
+    expect(screen.getByText('Obstacle preview · 4.00 × 2.00 m')).toBeInTheDocument()
 
     fireEvent.keyDown(window, { key: 'Escape' })
-    expect(screen.queryByText(/Drawing obstacle/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/Obstacle preview/)).not.toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: /^Obstacle/ }))
     fireEvent.click(screen.getByRole('button', { name: 'Draw obstacle' }))
@@ -595,6 +602,39 @@ describe('App', () => {
     fireEvent.click(screen.getByRole('button', { name: /^Obstacle/ }))
     fireEvent.click(screen.getByRole('button', { name: 'Cancel obstacle' }))
     expect(screen.getAllByRole('button', { name: /Remove obstacle/ })).toHaveLength(1)
+  })
+
+  it('moves and numerically edits an obstacle with chronological undo and redo', async () => {
+    render(<App webglAvailable />)
+    fireEvent.click(screen.getByRole('button', { name: 'Activate roof surface' }))
+    fireEvent.click(screen.getByRole('button', { name: /^Obstacle/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Draw obstacle' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Move obstacle' }))
+    fireEvent.click(screen.getByRole('tab', { name: 'Inspector' }))
+
+    const x = screen.getByRole('spinbutton', { name: 'Obstacle 1 X position in metres' })
+    const y = screen.getByRole('spinbutton', { name: 'Obstacle 1 Y position in metres' })
+    const width = screen.getByRole('spinbutton', { name: 'Obstacle 1 width in metres' })
+    expect(x).toHaveValue(2)
+    expect(y).toHaveValue(1)
+    expect(width).toHaveValue(8)
+
+    fireEvent.change(width, { target: { value: '5' } })
+    fireEvent.blur(width)
+    await waitFor(() => { expect(width).toHaveValue(5) })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Undo last action' }))
+    await waitFor(() => { expect(width).toHaveValue(8) })
+    fireEvent.click(screen.getByRole('button', { name: 'Undo last action' }))
+    await waitFor(() => {
+      expect(x).toHaveValue(0)
+      expect(y).toHaveValue(0)
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Redo last action' }))
+    await waitFor(() => {
+      expect(x).toHaveValue(2)
+      expect(y).toHaveValue(1)
+    })
   })
 
   it('disables panel interception while the obstacle tool owns surface pointer input', () => {

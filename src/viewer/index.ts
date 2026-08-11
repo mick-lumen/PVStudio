@@ -6,6 +6,7 @@ export type {
   ViewerLoadProgress,
   ViewerModelMetadata,
   ViewerModelSource,
+  ViewerModelUpAxis,
   ViewerPoint3,
   ViewerProps,
   ViewerRenderMode,

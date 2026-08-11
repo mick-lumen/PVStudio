@@ -2,6 +2,11 @@ import { defineConfig, devices } from '@playwright/test'
 
 const baseURL = process.env.PVSTUDIO_BASE_URL ?? 'http://127.0.0.1:4173/'
 const localServer = process.env.PVSTUDIO_BASE_URL === undefined
+const webServerTimeoutMs = Number(process.env.PVSTUDIO_WEB_SERVER_TIMEOUT_MS ?? '480000')
+
+if (!Number.isFinite(webServerTimeoutMs) || webServerTimeoutMs <= 0) {
+  throw new Error('PVSTUDIO_WEB_SERVER_TIMEOUT_MS must be a positive finite number')
+}
 
 /**
  * Production-browser checks run against the same Vite build surface a user
@@ -37,10 +42,11 @@ export default defineConfig({
   },
   webServer: localServer
     ? {
-        command: 'npm run build && npm run preview -- --host 127.0.0.1 --port 4173',
+        command:
+          'PVSTUDIO_E2E_STATIC_PREVIEW=true npm run build && PVSTUDIO_E2E_STATIC_PREVIEW=true npm run preview -- --host 127.0.0.1 --port 4173',
         url: baseURL,
         reuseExistingServer: !process.env.CI,
-        timeout: 180_000,
+        timeout: webServerTimeoutMs,
       }
     : undefined,
   projects: [

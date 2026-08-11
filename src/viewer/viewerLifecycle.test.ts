@@ -10,6 +10,7 @@ function fakeIndex(): ViewerSurfaceIndex {
     groupsFor: () => [],
     surfaceDescriptors: () => [],
     surfaceDescriptorsAsync: () => Promise.resolve([]),
+    prepareRaycastGridsAsync: () => Promise.resolve(),
     selectionForIntersection: () => null,
     raycastRawRay: () => null,
   }
@@ -26,7 +27,7 @@ describe('viewer surface lifecycle', () => {
       onReady: () => { events.push('surfaces') },
       onProgress: (phase) => { events.push(`progress:${phase}`) },
     })
-    expect(events).toEqual(['progress:started', 'index', 'descriptors', 'surfaces', 'progress:complete'])
+    expect(events).toEqual(['progress:started', 'index', 'progress:indexed', 'descriptors', 'surfaces', 'progress:complete'])
   })
 
   it('does not publish stale descriptors after replacement or abort', async () => {

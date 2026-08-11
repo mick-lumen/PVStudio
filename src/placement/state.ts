@@ -790,6 +790,11 @@ const normaliseDirection = (direction: Point2): Point2 => {
 
 type ObstacleSource = readonly RectangularObstacle[] | Readonly<Record<string, readonly RectangularObstacle[]>>
 
+interface PlacementHistorySnapshot {
+  readonly design: PlacementSnapshot
+  readonly obstacles?: ObstacleSource
+}
+
 const isObstacleList = (source: unknown): source is readonly RectangularObstacle[] => Array.isArray(source)
 
 const cloneObstacleSource = (source: unknown): ObstacleSource | undefined => {
@@ -973,8 +978,8 @@ export class PlacementStore {
   private gutters: Readonly<Record<string, SurfaceGutterOverride>>
   private obstacleSource: ObstacleSource | undefined
   private state: PlacementState
-  private undoStack: PlacementSnapshot[]
-  private redoStack: PlacementSnapshot[]
+  private undoStack: PlacementHistorySnapshot[]
+  private redoStack: PlacementHistorySnapshot[]
   private readonly listeners = new Set<PlacementStoreListener>()
 
   public constructor(options: unknown = {}) {
@@ -1042,11 +1047,11 @@ export class PlacementStore {
   }
 
   /**
-   * Replace only the obstacle context used by placement validation. The
-   * design state and undo/redo stacks are deliberately retained so editing
-   * obstacle annotations cannot erase panel work or create history entries.
-   * Surface-keyed sources must refer to surfaces currently known to the
-   * store; malformed sources are rejected without notifying subscribers.
+   * Replace the obstacle context used by placement validation. Obstacles are
+   * user-authored design data, so each effective replacement is one undoable
+   * history step alongside panel placement and array edits. Surface-keyed
+   * sources must refer to surfaces currently known to the store; malformed
+   * sources are rejected without notifying subscribers.
    */
   public setObstacles(source: unknown): boolean {
     if (!isObstacleSource(source)) return false
@@ -1058,11 +1063,20 @@ export class PlacementStore {
     const next = cloneObstacleSource(source)
     if (source !== undefined && next === undefined) return false
     if (equalValue(this.obstacleSource, next)) return false
+    const previous = this.historySnapshot()
     this.obstacleSource = next
     this.contextValue = contextFromParts(this.definitions, this.surfaces, this.gutters, next)
-    // Context changes are externally visible through the snapshot contract,
-    // but are not placement edits and therefore do not touch history.
-    this.state = freezeState({ ...this.state })
+    this.undoStack.push(previous)
+    this.redoStack = []
+    this.state = freezeState({
+      ...this.state,
+      manualPlacement: undefined,
+      arrayDrag: undefined,
+      autoFillPreview: undefined,
+      alignPreview: undefined,
+      undoDepth: this.undoStack.length,
+      redoDepth: 0,
+    })
     this.notify()
     return true
   }
@@ -1262,12 +1276,26 @@ export class PlacementStore {
     })
   }
 
+  private historySnapshot(): PlacementHistorySnapshot {
+    const obstacles = cloneObstacleSource(this.obstacleSource)
+    return deepFreeze({
+      design: this.snapshot(),
+      ...(obstacles === undefined ? {} : { obstacles }),
+    })
+  }
+
   private restore(snapshot: PlacementSnapshot): void {
     this.state = freezeState({ ...cloneSnapshot(snapshot), undoDepth: this.undoStack.length, redoDepth: this.redoStack.length })
   }
 
+  private restoreHistory(snapshot: PlacementHistorySnapshot): void {
+    this.obstacleSource = cloneObstacleSource(snapshot.obstacles)
+    this.contextValue = contextFromParts(this.definitions, this.surfaces, this.gutters, this.obstacleSource)
+    this.restore(snapshot.design)
+  }
+
   private commit(next: PlacementState): void {
-    this.undoStack.push(this.snapshot())
+    this.undoStack.push(this.historySnapshot())
     this.redoStack = []
     this.state = freezeState({ ...next, undoDepth: this.undoStack.length, redoDepth: 0 })
   }
@@ -1433,6 +1461,8 @@ export class PlacementStore {
     const point = localCenter ?? draft.localCenter
     if (point === undefined || !isFinitePoint(point)) return undefined
     const allocation = this.nextId()
+    const groupId = draft.groupId
+      ?? allocateGeneratedGroupId(this.state.placements, this.state.groupSettings, this.state.nextId)
     const placement = this.makePlacement({
       panelId: draft.panelId,
       surfaceId: draft.surfaceId,
@@ -1440,7 +1470,7 @@ export class PlacementStore {
       orientation: draft.orientation,
       clearanceM: draft.clearanceM,
       tiltDeg: draft.tiltDeg,
-      groupId: draft.groupId,
+      groupId,
     }, allocation.id)
     if (placement === undefined || !this.canPlace(placement)) return undefined
     const changed = this.update((state) => ({
@@ -1952,8 +1982,8 @@ export class PlacementStore {
   public undo(): boolean {
     const snapshot = this.undoStack.pop()
     if (snapshot === undefined) return false
-    this.redoStack.push(this.snapshot())
-    this.restore(snapshot)
+    this.redoStack.push(this.historySnapshot())
+    this.restoreHistory(snapshot)
     this.state = freezeState({ ...this.state, undoDepth: this.undoStack.length, redoDepth: this.redoStack.length })
     this.notify()
     return true
@@ -1962,8 +1992,8 @@ export class PlacementStore {
   public redo(): boolean {
     const snapshot = this.redoStack.pop()
     if (snapshot === undefined) return false
-    this.undoStack.push(this.snapshot())
-    this.restore(snapshot)
+    this.undoStack.push(this.historySnapshot())
+    this.restoreHistory(snapshot)
     this.state = freezeState({ ...this.state, undoDepth: this.undoStack.length, redoDepth: this.redoStack.length })
     this.notify()
     return true

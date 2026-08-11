@@ -38,6 +38,10 @@ jobs:
         run: npm run e2e
 
       - name: Build for project Pages path
+        env:
+          # Pages needs Vite's static output. The default production build
+          # targets the Cloudflare Worker + Assets deployment instead.
+          PVSTUDIO_E2E_STATIC_PREVIEW: "true"
         run: npm run build -- --base=/PVStudio/
 
       - name: Upload Pages artifact

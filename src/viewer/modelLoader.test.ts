@@ -1,14 +1,79 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { gzipSync } from 'node:zlib'
 import * as THREE from 'three'
 import { TextureLoader } from 'three'
 import { MTLLoader } from 'three/examples/jsm/loaders/MTLLoader.js'
-import { buildViewerObject, createViewerResourceRegistry, loadViewerModel, resourceBaseUrl, waitForMaterialTextures } from './modelLoader'
+import { buildViewerObject, createViewerResourceRegistry, decompressGzipBytes, loadViewerModel, resolveViewerModelUpAxis, resourceBaseUrl, transformViewerBounds, waitForMaterialTextures } from './modelLoader'
 import type { ObjDocumentBounds, ParsedObjDocument } from './objParser'
 import { disposeViewerObject } from './renderMode'
 
 describe('viewer resource mapping and model loading', () => {
   afterEach(() => {
     vi.restoreAllMocks()
+  })
+
+  it('decompresses gzip model bytes without converting through a string', async () => {
+    const source = new TextEncoder().encode('v 0 0 0\nf 1 1 1\n')
+    const compressedBuffer = gzipSync(source)
+    const compressed = compressedBuffer.buffer.slice(compressedBuffer.byteOffset, compressedBuffer.byteOffset + compressedBuffer.byteLength)
+
+    const decompressed = await decompressGzipBytes(compressed)
+
+    expect(new TextDecoder().decode(decompressed)).toBe('v 0 0 0\nf 1 1 1\n')
+  })
+
+  it('accepts model bytes already decoded from an HTTP gzip response', async () => {
+    const decoded = new TextEncoder().encode('v 0 0 0\nf 1 1 1\n')
+    const decodedBuffer = decoded.buffer.slice(decoded.byteOffset, decoded.byteOffset + decoded.byteLength)
+
+    const result = await decompressGzipBytes(decodedBuffer)
+
+    expect(result).toBe(decodedBuffer)
+    expect(new TextDecoder().decode(result)).toBe('v 0 0 0\nf 1 1 1\n')
+  })
+
+  it('detects WebODM Z-up bounds while preserving conventional and ambiguous Y-up models', () => {
+    const webOdmBounds = { min: { x: -50, y: -45, z: -24 }, max: { x: 65, y: 55, z: -8 } }
+    const conventionalBounds = { min: { x: -20, y: 0, z: -15 }, max: { x: 20, y: 8, z: 15 } }
+    const ambiguousBounds = { min: { x: 0, y: 0, z: 0 }, max: { x: 10, y: 8, z: 9 } }
+
+    expect(resolveViewerModelUpAxis('auto', webOdmBounds)).toBe('z')
+    expect(resolveViewerModelUpAxis(undefined, conventionalBounds)).toBe('y')
+    expect(resolveViewerModelUpAxis('auto', ambiguousBounds)).toBe('y')
+    expect(resolveViewerModelUpAxis('y', webOdmBounds)).toBe('y')
+    expect(resolveViewerModelUpAxis('z', conventionalBounds)).toBe('z')
+  })
+
+  it('maps Z-up source bounds to canonical Y-up viewer bounds', () => {
+    expect(transformViewerBounds(
+      { min: { x: -3, y: -8, z: -2 }, max: { x: 7, y: 12, z: 4 } },
+      'z',
+    )).toEqual({ min: { x: -3, y: -2, z: -12 }, max: { x: 7, y: 4, z: 8 } })
+  })
+
+  it('normalises an auto-detected Z-up site before provisional and final framing', async () => {
+    let provisionalBounds: ObjDocumentBounds | undefined
+    const loaded = await loadViewerModel({
+      name: 'Z-up photogrammetry fixture',
+      upAxis: 'auto',
+      obj: [
+        'v 0 0 0',
+        'v 10 0 0',
+        'v 0 20 0',
+        'v 0 0 2',
+        'f 1 2 3',
+        'f 1 2 4',
+      ].join('\n'),
+    }, { onObjectReady: (_object, _dispose, bounds) => { provisionalBounds = bounds } })
+
+    expect(provisionalBounds).toEqual({ min: { x: 0, y: 0, z: -20 }, max: { x: 10, y: 2, z: 0 } })
+    expect(loaded.metadata.boundingBox.size.x).toBeCloseTo(10)
+    expect(loaded.metadata.boundingBox.size.y).toBeCloseTo(2)
+    expect(loaded.metadata.boundingBox.size.z).toBeCloseTo(20)
+    expect(loaded.object.rotation.x).toBeCloseTo(0)
+    const firstMesh = loaded.object.children.find((child) => child instanceof THREE.Mesh)
+    expect(firstMesh?.rotation.x).toBeCloseTo(-Math.PI / 2)
+    loaded.dispose()
   })
 
   it('maps local texture basenames to object URLs and revokes them once', () => {
@@ -260,6 +325,7 @@ describe('viewer resource mapping and model loading', () => {
       expect(position.count).toBe(6)
       expect(uv.count).toBe(position.count)
       expect(normal.count).toBe(position.count)
+      expect(geometry.userData.surfaceVertexIdentity).toBe('coordinate')
       expect(Array.from(normal.array)).toEqual([
         0, 1, 0,
         0, 1, 0,

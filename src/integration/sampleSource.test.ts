@@ -5,9 +5,10 @@ describe('checked-in WebODM sample source', () => {
   it('uses the public fixture OBJ, MTL, and texture URLs by default', () => {
     const source = createSampleViewerSource()
     expect(source).toMatchObject({
-      obj: '/test-data/synthetic-webodm-house/synthetic-webodm-house.obj',
+      obj: '/test-data/synthetic-webodm-house/synthetic-webodm-house.obj.gz',
       mtl: '/test-data/synthetic-webodm-house/synthetic-webodm-house.mtl',
       name: 'Synthetic WebODM house',
+      upAxis: 'y',
     })
     expect(source.textures).toEqual([
       '/test-data/synthetic-webodm-house/ground-texture.jpg',
@@ -21,7 +22,7 @@ describe('checked-in WebODM sample source', () => {
   it('honours an explicit relative or absolute asset base path', () => {
     expect(sampleModelAssetPaths('/assets/fixture')).toEqual({
       basePath: '/assets/fixture',
-      obj: '/assets/fixture/synthetic-webodm-house.obj',
+      obj: '/assets/fixture/synthetic-webodm-house.obj.gz',
       mtl: '/assets/fixture/synthetic-webodm-house.mtl',
       textures: [
         '/assets/fixture/ground-texture.jpg',
@@ -31,7 +32,7 @@ describe('checked-in WebODM sample source', () => {
     })
     expect(sampleModelAssetPaths('https://cdn.example.test/pv-sample/')).toMatchObject({
       basePath: 'https://cdn.example.test/pv-sample',
-      obj: 'https://cdn.example.test/pv-sample/synthetic-webodm-house.obj',
+      obj: 'https://cdn.example.test/pv-sample/synthetic-webodm-house.obj.gz',
     })
   })
 })

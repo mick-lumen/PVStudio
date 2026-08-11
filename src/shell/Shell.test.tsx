@@ -227,6 +227,7 @@ describe('Shell', () => {
     const onToolChange = vi.fn()
     const onObstacleStart = vi.fn()
     const onObstacleCancel = vi.fn()
+    const onObstacleChange = vi.fn()
     const onObstacleRemove = vi.fn()
     const onObstaclesClear = vi.fn()
     const draftObstacle: RectangularObstacle = { id: 'draft', x: 0.5, y: 1, width: 1.5, height: 0.75 }
@@ -238,6 +239,7 @@ describe('Shell', () => {
         onObstacleCancel={onObstacleCancel}
         obstacles={[obstacle]}
         draftObstacle={draftObstacle}
+        onObstacleChange={onObstacleChange}
         onObstacleRemove={onObstacleRemove}
         onObstaclesClear={onObstaclesClear}
         webglAvailable={true}
@@ -249,12 +251,19 @@ describe('Shell', () => {
     fireEvent.click(obstacleButton)
     expect(onObstacleStart).toHaveBeenCalledTimes(1)
     expect(onToolChange).toHaveBeenCalledWith('obstacle')
-    expect(screen.getByText(/Drag on the active surface to draw an obstacle.*minimum 0\.05 m/)).toBeInTheDocument()
+    expect(screen.getByText(/Drag empty surface to draw an obstacle.*minimum 0\.05 m.*drag an existing obstacle to move/)).toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('tab', { name: 'Inspector' }))
     expect(screen.getByRole('heading', { name: 'Surface obstacles' })).toBeInTheDocument()
     expect(screen.getByText('2.00 × 3.00 m')).toBeInTheDocument()
-    expect(screen.getByText('Drawing obstacle · 1.50 × 0.75 m')).toBeInTheDocument()
+    expect(screen.getByText('Obstacle preview · 1.50 × 0.75 m')).toBeInTheDocument()
+    const width = screen.getByRole('spinbutton', { name: 'Obstacle 1 width in metres' })
+    fireEvent.change(width, { target: { value: '2.5' } })
+    fireEvent.blur(width)
+    expect(onObstacleChange).toHaveBeenCalledWith(obstacle.id, { width: 2.5 })
+    fireEvent.change(width, { target: { value: '0.01' } })
+    fireEvent.blur(width)
+    expect(width).toHaveValue(2)
     fireEvent.click(screen.getByRole('button', { name: `Remove obstacle ${obstacle.id}` }))
     fireEvent.click(screen.getByRole('button', { name: 'Clear all obstacles' }))
     expect(onObstacleRemove).toHaveBeenCalledWith(obstacle.id)
