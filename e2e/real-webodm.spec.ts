@@ -104,7 +104,7 @@ test.describe('real WebODM acceptance', () => {
     const pageErrors: string[] = []
     page.on('pageerror', (error) => pageErrors.push(error.message))
 
-    await page.goto('/')
+    await page.goto('./')
     await expect(page.getByTestId('pv-shell')).toBeVisible({ timeout: 90_000 })
     await page.getByLabel('Import site model').setInputFiles(realSampleZip)
 
@@ -175,7 +175,7 @@ test.describe('real WebODM acceptance', () => {
     const pageErrors: string[] = []
     page.on('pageerror', (error) => pageErrors.push(error.message))
 
-    await page.goto('/')
+    await page.goto('./')
     await expect(page.getByTestId('pv-shell')).toBeVisible({ timeout: 90_000 })
     await page.getByLabel('Import site model').setInputFiles(realSampleFiles(realSampleDirectory))
 
@@ -200,7 +200,7 @@ test.describe('real WebODM acceptance', () => {
     page.on('pageerror', (error) => pageErrors.push(error.message))
 
     await page.emulateMedia({ reducedMotion: 'reduce' })
-    await page.goto('/')
+    await page.goto('./')
     await expect(page.getByTestId('pv-shell')).toBeVisible({ timeout: 90_000 })
     await page.getByLabel('Import site model').setInputFiles(realSampleObj(realSampleDirectory))
 

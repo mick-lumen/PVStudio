@@ -17,7 +17,9 @@ async function canvasPoint(page: Page, xRatio: number, yRatio: number): Promise<
 }
 
 async function waitForViewer(page: Page): Promise<void> {
-  await page.goto('/')
+  // Keep the configured deployment path (for example /PVStudio/ on Pages)
+  // instead of resolving to the hosting origin root.
+  await page.goto('./')
   await expect(page.getByTestId('pv-shell')).toBeVisible({ timeout: READY_TIMEOUT })
   await expect.poll(async () => page.locator('canvas').count(), {
     timeout: READY_TIMEOUT,

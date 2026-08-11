@@ -10,7 +10,7 @@ async function canvasPoint(page: Page, xRatio: number, yRatio: number): Promise<
 
 test.describe('PV Studio mobile touch workflow', () => {
   test('opens the compact workspace, selects a surface by touch, and switches view modes', async ({ page }) => {
-    await page.goto('/')
+    await page.goto('./')
     await expect(page.getByTestId('pv-shell')).toBeVisible({ timeout: READY_TIMEOUT })
     await expect.poll(async () => page.locator('canvas').count(), {
       timeout: READY_TIMEOUT,

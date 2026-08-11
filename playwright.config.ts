@@ -1,6 +1,7 @@
 import { defineConfig, devices } from '@playwright/test'
+import { normaliseE2eBaseUrl } from './build/e2eBaseUrl'
 
-const baseURL = process.env.PVSTUDIO_BASE_URL ?? 'http://127.0.0.1:4173/'
+const baseURL = normaliseE2eBaseUrl(process.env.PVSTUDIO_BASE_URL ?? 'http://127.0.0.1:4173/')
 const localServer = process.env.PVSTUDIO_BASE_URL === undefined
 const webServerTimeoutMs = Number(process.env.PVSTUDIO_WEB_SERVER_TIMEOUT_MS ?? '480000')
 
