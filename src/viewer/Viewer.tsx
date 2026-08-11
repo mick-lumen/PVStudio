@@ -167,7 +167,16 @@ function MetadataOverlay({ metadata, surfaceCount }: { metadata: ViewerModelMeta
   const vertexCount = metadata.sourceVertexCount ?? metadata.vertexCount
   const polygonCount = metadata.sourcePolygonCount ?? metadata.polygonCount
   return (
-    <details open style={{ ...overlayStyle, top: 12, left: 12, maxWidth: 220, pointerEvents: 'auto' }}>
+    <details
+      open
+      data-testid="viewer-metadata"
+      data-model-name={metadata.name}
+      data-vertex-count={vertexCount}
+      data-polygon-count={polygonCount}
+      data-mesh-count={metadata.meshCount}
+      data-surface-count={surfaceCount}
+      style={{ ...overlayStyle, top: 12, left: 12, maxWidth: 220, pointerEvents: 'auto' }}
+    >
       <summary style={{ cursor: 'pointer', padding: '6px 9px', borderRadius: 8, background: 'rgba(255,255,255,.86)', boxShadow: '0 2px 12px rgba(20,40,38,.08)' }}>
         {metadata.isDemo ? 'Demo survey site' : metadata.name}
       </summary>

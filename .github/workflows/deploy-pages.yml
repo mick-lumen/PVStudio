@@ -37,6 +37,15 @@ jobs:
       - name: Run production browser flows
         run: npm run e2e
 
+      - name: Upload browser failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-failure-evidence
+          path: /tmp/pvstudio-playwright-results
+          if-no-files-found: ignore
+          retention-days: 7
+
       - name: Build for project Pages path
         env:
           # Pages needs Vite's static output. The default production build

@@ -137,17 +137,27 @@ test.describe('PV Studio production-browser workflow', () => {
       timeout: LARGE_MODEL_READY_TIMEOUT,
     })
     const sampleViewer = page.getByTestId('pv-viewer')
-    // Exact model identity and counts prevent the previous demo overlay from
-    // satisfying these waits while the large replacement is still loading.
-    await expect(sampleViewer.getByText('Synthetic WebODM house', { exact: true })).toBeVisible({
+    const sampleMetadata = sampleViewer.getByTestId('viewer-metadata')
+    // Assert the parser-owned numeric contract rather than relying solely on
+    // locale-formatted copy. The visible strings remain checked below, while
+    // these attributes make a constrained CI failure report the exact model
+    // identity/count it reached instead of timing out with ambiguous text.
+    await expect(sampleMetadata).toHaveAttribute('data-model-name', 'Synthetic WebODM house', {
       timeout: LARGE_MODEL_READY_TIMEOUT,
     })
-    await expect(sampleViewer.getByText('545,871 vertices', { exact: true })).toBeVisible({
-      timeout: LARGE_MODEL_READY_TIMEOUT,
+    await test.info().attach('sample-metadata.txt', {
+      body: await sampleMetadata.evaluate((element) => {
+        const attributes = Object.fromEntries(
+          Array.from(element.attributes, ({ name, value }) => [name, value]),
+        )
+        return JSON.stringify({ attributes, text: element.textContent }, null, 2)
+      }),
+      contentType: 'text/plain',
     })
-    await expect(sampleViewer.getByText('1,086,560 polygons', { exact: true })).toBeVisible({
-      timeout: LARGE_MODEL_READY_TIMEOUT,
-    })
+    await expect(sampleMetadata).toHaveAttribute('data-vertex-count', '545871')
+    await expect(sampleMetadata).toHaveAttribute('data-polygon-count', '1086560')
+    await expect(sampleViewer.getByText('545,871 vertices', { exact: true })).toBeVisible()
+    await expect(sampleViewer.getByText('1,086,560 polygons', { exact: true })).toBeVisible()
     await expect(page.locator('.surface-chip')).toBeVisible({ timeout: LARGE_MODEL_READY_TIMEOUT })
   })
 
