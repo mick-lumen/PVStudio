@@ -2,6 +2,11 @@ import { expect, test, type Page } from '@playwright/test'
 
 const READY_TIMEOUT = 90_000
 const ACTION_TIMEOUT = 30_000
+const LARGE_MODEL_READY_TIMEOUT = Number(process.env.PVSTUDIO_LARGE_MODEL_TIMEOUT_MS ?? '240000')
+
+if (!Number.isFinite(LARGE_MODEL_READY_TIMEOUT) || LARGE_MODEL_READY_TIMEOUT <= 0) {
+  throw new Error('PVSTUDIO_LARGE_MODEL_TIMEOUT_MS must be a positive finite number')
+}
 
 const status = (page: Page) => page.locator('[data-panel-render-status="true"]')
 
@@ -93,6 +98,10 @@ async function selectGroundPair(page: Page): Promise<void> {
 
 test.describe('PV Studio production-browser workflow', () => {
   test('loads the sample model, switches viewer modes, and selects a surface', async ({ page }) => {
+    // The checked-in acceptance model has more than one million triangles.
+    // Keep its allowance explicit and configurable for slower software-WebGL
+    // CI runners while retaining the tighter timeout for every other flow.
+    test.setTimeout(LARGE_MODEL_READY_TIMEOUT + READY_TIMEOUT)
     await waitForViewer(page)
 
     await page.getByRole('group', { name: 'Camera mode' }).getByRole('button', { name: '2D plan', exact: true }).click()
@@ -124,10 +133,22 @@ test.describe('PV Studio production-browser workflow', () => {
     await expect(page.locator('.surface-chip')).not.toHaveText(initialSurfaceText ?? '', { timeout: ACTION_TIMEOUT })
 
     await page.locator('.topbar [data-testid="load-sample-model"]').click()
-    await expect(page.locator('.topbar .brand-context')).toHaveText('Synthetic WebODM house', { timeout: READY_TIMEOUT })
-    await expect(page.getByTestId('pv-viewer').getByText(/\d+ vertices/)).toBeVisible({ timeout: READY_TIMEOUT })
-    await expect(page.getByTestId('pv-viewer').getByText(/\d+ polygons/)).toBeVisible({ timeout: READY_TIMEOUT })
-    await expect(page.locator('.surface-chip')).toBeVisible({ timeout: READY_TIMEOUT })
+    await expect(page.locator('.topbar .brand-context')).toHaveText('Synthetic WebODM house', {
+      timeout: LARGE_MODEL_READY_TIMEOUT,
+    })
+    const sampleViewer = page.getByTestId('pv-viewer')
+    // Exact model identity and counts prevent the previous demo overlay from
+    // satisfying these waits while the large replacement is still loading.
+    await expect(sampleViewer.getByText('Synthetic WebODM house', { exact: true })).toBeVisible({
+      timeout: LARGE_MODEL_READY_TIMEOUT,
+    })
+    await expect(sampleViewer.getByText('545,871 vertices', { exact: true })).toBeVisible({
+      timeout: LARGE_MODEL_READY_TIMEOUT,
+    })
+    await expect(sampleViewer.getByText('1,086,560 polygons', { exact: true })).toBeVisible({
+      timeout: LARGE_MODEL_READY_TIMEOUT,
+    })
+    await expect(page.locator('.surface-chip')).toBeVisible({ timeout: LARGE_MODEL_READY_TIMEOUT })
   })
 
   test('retries an invalid panel placement, commits a valid panel, and drags it without rotating the camera', async ({ page }) => {
