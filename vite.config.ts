@@ -21,7 +21,11 @@ export default defineConfig(async () => {
       chunkSizeWarningLimit: 1100,
       rollupOptions: {
         output: {
-          manualChunks: { three: ['three', '@react-three/fiber', '@react-three/drei'] },
+          manualChunks: (id: string): string | undefined => id.includes('/node_modules/three/')
+            || id.includes('/node_modules/@react-three/fiber/')
+            || id.includes('/node_modules/@react-three/drei/')
+            ? 'three'
+            : undefined,
         },
       },
     },

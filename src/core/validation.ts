@@ -123,6 +123,12 @@ export const isPolygon = (value: unknown): value is Polygon => {
     const dy = current.y - next.y
     if (dx * dx + dy * dy <= MIN_VECTOR_LENGTH_SQUARED) return false
   }
+  if (value.holes !== undefined) {
+    if (!Array.isArray(value.holes)) return false
+    for (const hole of value.holes) {
+      if (!Array.isArray(hole) || hole.length < 3 || !hole.every(isPoint2)) return false
+    }
+  }
   return true
 }
 
@@ -210,6 +216,10 @@ export const isPanelGroupSettings = (value: unknown): value is PanelGroupSetting
   const modulesPerRow = value.modulesPerRow
   const rowOffsetM = value.rowOffsetM
   const obstacleClearanceM = value.obstacleClearanceM
+  const azimuthDeg = value.azimuthDeg
+  const modulesPerColumn = value.modulesPerColumn
+  const horizontalGroupSpacingM = value.horizontalGroupSpacingM
+  const verticalGroupSpacingM = value.verticalGroupSpacingM
   return isFiniteNumber(value.interPanelSpacingM)
     && value.interPanelSpacingM >= 0
     && isFiniteNumber(value.rowSpacingM)
@@ -221,8 +231,13 @@ export const isPanelGroupSettings = (value: unknown): value is PanelGroupSetting
     && isFiniteNumber(value.tiltDeg)
     && value.tiltDeg >= 0
     && value.tiltDeg <= 90
+    && (azimuthDeg === undefined || isFiniteNumber(azimuthDeg))
     && (modulesPerRow === undefined
       || (isFiniteNumber(modulesPerRow) && Number.isInteger(modulesPerRow) && modulesPerRow > 0))
+    && (modulesPerColumn === undefined
+      || (isFiniteNumber(modulesPerColumn) && Number.isInteger(modulesPerColumn) && modulesPerColumn > 0))
+    && (horizontalGroupSpacingM === undefined || (isFiniteNumber(horizontalGroupSpacingM) && horizontalGroupSpacingM >= 0))
+    && (verticalGroupSpacingM === undefined || (isFiniteNumber(verticalGroupSpacingM) && verticalGroupSpacingM >= 0))
     && (rowOffsetM === undefined || (isFiniteNumber(rowOffsetM) && rowOffsetM >= 0))
     && (obstacleClearanceM === undefined || (isFiniteNumber(obstacleClearanceM) && obstacleClearanceM >= 0))
 }
@@ -233,6 +248,7 @@ export const isPanelPlacement = (value: unknown): value is PanelPlacement => {
   if (!hasNonEmptyString(value, 'surfaceId') || !isPoint2(value.localCenter) || !isOrientation(value.orientation)) return false
   if (!isFiniteNumber(value.clearanceM) || value.clearanceM < 0
     || !isFiniteNumber(value.tiltDeg) || value.tiltDeg < 0 || value.tiltDeg > 90) return false
+  if (value.azimuthDeg !== undefined && !isFiniteNumber(value.azimuthDeg)) return false
   return value.groupId === undefined || hasNonEmptyString(value, 'groupId')
 }
 
@@ -361,7 +377,10 @@ export function createRect(value: Rect): Rect {
 /** Validate, clone and freeze a polygon. */
 export function createPolygon(value: Polygon): Polygon {
   assertValid(isPolygon(value), 'Polygon must contain at least three finite points')
-  return deepFreeze({ points: value.points.map(copyPoint2) })
+  return deepFreeze({
+    points: value.points.map(copyPoint2),
+    ...(value.holes === undefined ? {} : { holes: value.holes.map((hole) => hole.map(copyPoint2)) }),
+  })
 }
 
 /** Validate and clone either supported surface region. */

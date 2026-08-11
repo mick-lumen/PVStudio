@@ -7,6 +7,8 @@ export interface PanelPointerInfo {
   readonly ctrlKey: boolean
   readonly metaKey: boolean
   readonly button: number
+  readonly clientX?: number
+  readonly clientY?: number
   readonly instanceId?: number
 }
 
@@ -19,4 +21,5 @@ export interface PanelLayerInteractionProps {
   readonly onPanelDragStart?: PanelInteractionHandler
   readonly onPanelDrag?: PanelInteractionHandler
   readonly onPanelDragEnd?: PanelInteractionHandler
+  readonly onPanelContextMenu?: PanelInteractionHandler
 }

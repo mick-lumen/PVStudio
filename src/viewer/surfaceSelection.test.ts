@@ -54,6 +54,17 @@ function makeTupleSeamedPlanarMesh(): THREE.Mesh {
   return new THREE.Mesh(geometry, new THREE.MeshBasicMaterial())
 }
 
+function makeNoisyTupleSeamedPlanarMesh(): THREE.Mesh {
+  const geometry = new THREE.BufferGeometry()
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute([
+    0, 0, 0, 1, 0, 1, 1, 0, 0,
+    0.006, 0, 0.004, 0, 0, 1, 1.005, 0, 1.004,
+  ], 3))
+  geometry.setIndex([0, 1, 2, 3, 4, 5])
+  geometry.userData.surfaceVertexIdentity = 'coordinate'
+  return new THREE.Mesh(geometry, new THREE.MeshBasicMaterial())
+}
+
 function makeTranslatedShallowHingeMesh(translationX: number): THREE.Mesh {
   // The faces share an edge and differ by a hundredth of a degree. Their local geometry
   // is identical regardless of translation, so surface grouping must be too.
@@ -258,6 +269,32 @@ describe('viewer surface indexing', () => {
     expect(groups[1]?.faceIndices).toEqual([2])
     expect(groups[0]?.area).toBeCloseTo(1)
     expect(groups[1]?.area).toBeCloseTo(0.5)
+  })
+
+  it('uses geometry-derived stable roof IDs instead of transient Three.js UUIDs', () => {
+    const first = makePlanarMesh()
+    const second = makePlanarMesh()
+    try {
+      expect(first.uuid).not.toBe(second.uuid)
+      expect(buildViewerSurfaceGroups(first).map((group) => group.id))
+        .toEqual(buildViewerSurfaceGroups(second).map((group) => group.id))
+    } finally {
+      first.geometry.dispose()
+      second.geometry.dispose()
+      ;(first.material as THREE.Material).dispose()
+      ;(second.material as THREE.Material).dispose()
+    }
+  })
+
+  it('joins millimetre-scale WebODM tuple seams with a configurable distance tolerance', () => {
+    const mesh = makeNoisyTupleSeamedPlanarMesh()
+    try {
+      expect(buildViewerSurfaceGroups(mesh)).toHaveLength(1)
+      expect(buildViewerSurfaceGroups(mesh, undefined, { joinToleranceM: 0.001 })).toHaveLength(2)
+    } finally {
+      mesh.geometry.dispose()
+      ;(mesh.material as THREE.Material).dispose()
+    }
   })
 
   it('keeps microscopic photogrammetry fragments out of the interactive design index', async () => {
@@ -611,6 +648,82 @@ describe('viewer surface indexing', () => {
     expect(hit).not.toBeNull()
     if (hit === null || !('points' in hit.selection.surface.region)) return
     expect(hit.selection.surface.region.points).toHaveLength(6)
+  })
+
+  it('consolidates coplanar material meshes that share a physical roof edge', async () => {
+    const makeHalf = (minimumX: number, maximumX: number): THREE.Mesh => {
+      const geometry = new THREE.BufferGeometry()
+      geometry.setAttribute('position', new THREE.Float32BufferAttribute([
+        minimumX, 0, 0,
+        minimumX, 0, 4,
+        maximumX, 0, 4,
+        maximumX, 0, 0,
+      ], 3))
+      geometry.setIndex([0, 1, 2, 0, 2, 3])
+      return new THREE.Mesh(geometry, new THREE.MeshBasicMaterial())
+    }
+    const root = new THREE.Group()
+    const left = makeHalf(0, 3)
+    const right = makeHalf(3, 6)
+    root.add(left, right)
+    try {
+      const index = await createViewerSurfaceIndexAsync(root, 'material-split-roof', undefined, {
+        chunkSize: 1,
+        minimumSurfaceAreaM2: 1,
+      })
+      const descriptors = await index.surfaceDescriptorsAsync({ chunkSize: 1 })
+      expect(index.groupsFor(left)).toHaveLength(1)
+      expect(index.groupsFor(right)).toHaveLength(1)
+      expect(descriptors).toHaveLength(1)
+      const roof = descriptors[0]
+      expect(roof?.faceRefs).toHaveLength(2)
+      expect(roof?.area).toBeCloseTo(24)
+      expect(roof !== undefined && 'points' in roof.region).toBe(true)
+      if (roof !== undefined && 'points' in roof.region) expect(polygonArea(roof.region.points)).toBeCloseTo(24)
+
+      const leftHit = index.selectionForIntersection({ object: left, faceIndex: 0, point: new THREE.Vector3(1, 0, 1) })
+      const rightHit = index.selectionForIntersection({ object: right, faceIndex: 0, point: new THREE.Vector3(5, 0, 1) })
+      expect(leftHit?.selection.surface.id).toBe(roof?.id)
+      expect(rightHit?.selection.surface.id).toBe(roof?.id)
+      expect(leftHit?.selection.hitLocal.y).not.toBe(rightHit?.selection.hitLocal.y)
+
+      expect(index.splitSurfaceId(roof?.id ?? '')).toBe(true)
+      const split = await index.surfaceDescriptorsAsync({ chunkSize: 1 })
+      expect(split).toHaveLength(2)
+      expect(index.mergeSurfaceIds(split.map((surface) => surface.id))).toBe(true)
+      await expect(index.surfaceDescriptorsAsync({ chunkSize: 1 })).resolves.toHaveLength(1)
+    } finally {
+      for (const mesh of [left, right]) {
+        mesh.geometry.dispose()
+        ;(mesh.material as THREE.Material).dispose()
+      }
+    }
+  })
+
+  it('keeps edge-connected material meshes separate when their planes differ', async () => {
+    const firstGeometry = new THREE.BufferGeometry()
+    firstGeometry.setAttribute('position', new THREE.Float32BufferAttribute([0, 0, 0, 0, 0, 2, 2, 0, 2, 2, 0, 0], 3))
+    firstGeometry.setIndex([0, 1, 2, 0, 2, 3])
+    const secondGeometry = new THREE.BufferGeometry()
+    secondGeometry.setAttribute('position', new THREE.Float32BufferAttribute([2, 0, 0, 2, 0, 2, 4, 1, 2, 4, 1, 0], 3))
+    secondGeometry.setIndex([0, 1, 2, 0, 2, 3])
+    const first = new THREE.Mesh(firstGeometry, new THREE.MeshBasicMaterial())
+    const second = new THREE.Mesh(secondGeometry, new THREE.MeshBasicMaterial())
+    const root = new THREE.Group().add(first, second)
+    try {
+      const index = await createViewerSurfaceIndexAsync(root, 'pitched-material-seam', undefined, {
+        chunkSize: 1,
+        minimumSurfaceAreaM2: 1,
+        normalAngleToleranceDeg: 10,
+      })
+      const descriptors = await index.surfaceDescriptorsAsync({ chunkSize: 1 })
+      expect(descriptors).toHaveLength(2)
+      expect(index.mergeSurfaceIds(descriptors.map((surface) => surface.id))).toBe(false)
+    } finally {
+      firstGeometry.dispose(); secondGeometry.dispose()
+      ;(first.material as THREE.Material).dispose()
+      ;(second.material as THREE.Material).dispose()
+    }
   })
 
   it('keeps indexed-grid area, boundary projection, and center-face selection exact', async () => {

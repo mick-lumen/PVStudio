@@ -157,13 +157,14 @@ describe('PlacementStore manual placement and selection', () => {
 
     store.selectPanels(['a-1', 'a-2'])
     expect(store.rotateGroup(true)).toBe(true)
-    expect(store.getState().placements['a-1']?.orientation).toBe('landscape')
+    expect(store.getState().placements['a-1']?.orientation).toBe('portrait')
     expect(store.getState().placements['a-1']?.localCenter.x).toBeCloseTo(3.55)
-    expect(store.getState().placements['a-1']?.localCenter.y).toBeCloseTo(3.05)
-    expect(store.getState().placements['a-2']?.orientation).toBe('landscape')
+    expect(store.getState().placements['a-1']?.localCenter.y).toBeCloseTo(1.95)
+    expect(store.getState().placements['a-1']?.azimuthDeg).toBe(90)
+    expect(store.getState().placements['a-2']?.orientation).toBe('portrait')
     expect(store.getState().placements['a-2']?.localCenter.x).toBeCloseTo(3.55)
-    expect(store.getState().placements['a-2']?.localCenter.y).toBeCloseTo(1.95)
-    expect(store.getGroupSettings('array-a')).toMatchObject({ orientation: 'landscape', interPanelSpacingM: 0.2, rowSpacingM: 0.1 })
+    expect(store.getState().placements['a-2']?.localCenter.y).toBeCloseTo(3.05)
+    expect(store.getGroupSettings('array-a')).toMatchObject({ orientation: 'portrait', azimuthDeg: 90, interPanelSpacingM: 0.1, rowSpacingM: 0.2 })
     expect(store.undo()).toBe(true)
     expect(store.getState().placements['a-1']?.orientation).toBe('portrait')
   })
@@ -588,6 +589,19 @@ describe('PlacementStore auto-fill, history and selectors', () => {
     expect(store.getState().placements['a-1']).toMatchObject({ clearanceM: 0.2, tiltDeg: 10 })
     expect(store.undo()).toBe(true)
     expect(store.getState().placements['a-1']?.localCenter.x).toBeCloseTo(3)
+  })
+
+  it('resizes an array as one validated row-by-column transaction', () => {
+    const store = makeStore()
+    store.addPanel({ panelId: panel.id, surfaceId: 'roof', localCenter: { x: 4, y: 2.5 }, groupId: 'array-a', id: 'a-1' })
+
+    expect(store.setGroupSettings('array-a', { modulesPerRow: 3, modulesPerColumn: 2 })).toBe(true)
+    const resized = Object.values(store.getState().placements).filter((placement) => placement.groupId === 'array-a')
+    expect(resized).toHaveLength(6)
+    expect(new Set(resized.map((placement) => placement.id)).size).toBe(6)
+    expect(store.getState().selectedIds).toHaveLength(6)
+    expect(store.undo()).toBe(true)
+    expect(Object.values(store.getState().placements).filter((placement) => placement.groupId === 'array-a')).toHaveLength(1)
   })
 
   it('clears optional auto-fill settings and restores them through undo and redo', () => {

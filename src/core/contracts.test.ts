@@ -149,6 +149,17 @@ describe('immutable serialisable constructors', () => {
     expect(Object.isFrozen(frozenDescriptor.faceRefs[0])).toBe(true)
     expect(Object.isFrozen(frozenDescriptor.frame)).toBe(true)
 
+    const polygonDescriptor = createSurfaceDescriptor({
+      ...descriptor,
+      region: {
+        points: [{ x: 0, y: 0 }, { x: 8, y: 0 }, { x: 8, y: 4 }, { x: 0, y: 4 }],
+        holes: [[{ x: 2, y: 1 }, { x: 3, y: 1 }, { x: 3, y: 2 }, { x: 2, y: 2 }]],
+      },
+    })
+    expect('holes' in polygonDescriptor.region ? polygonDescriptor.region.holes : undefined).toEqual([
+      [{ x: 2, y: 1 }, { x: 3, y: 1 }, { x: 3, y: 2 }, { x: 2, y: 2 }],
+    ])
+
     const edge = createSurfaceEdgeMetadata({
       type: 'ridge',
       direction: { x: 0, y: 2 },

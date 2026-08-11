@@ -29,6 +29,7 @@ import {
 } from './placement'
 import { PanelChooser } from './panels'
 import {
+  ArrayCanvasHandles,
   PanelLayer,
   PanelSlotOutlines,
   PanelRenderStatus,
@@ -39,6 +40,7 @@ import {
 import {
   Shell,
   type AlignPreviewState,
+  type ShellArray,
   type ShellPanel,
   type ShellSurface,
   type ShellSurfaceEdge,
@@ -73,6 +75,13 @@ export interface AppProps {
   readonly initialCameraMode?: ViewMode
   readonly initialRenderMode?: RenderMode
   readonly initialShowGrid?: boolean
+}
+
+interface PanelContextMenuState {
+  readonly placementId: string
+  readonly arrayId: string
+  readonly clientX: number
+  readonly clientY: number
 }
 
 const CATALOG_DEFINITIONS: readonly PanelDefinition[] = Object.freeze(PANEL_CATALOG.map((panel) => toPanelDefinition(panel)))
@@ -305,6 +314,8 @@ export function App({
   const [loadProgress, setLoadProgress] = useState<ViewerLoadProgress | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [importNotice, setImportNotice] = useState<string | null>(null)
+  const [interactionNotice, setInteractionNotice] = useState<{ readonly text: string; readonly kind: 'default' | 'error' } | null>(null)
+  const [panelContextMenu, setPanelContextMenu] = useState<PanelContextMenuState | null>(null)
   const surfacesRef = useRef<readonly SurfaceDescriptor[]>([])
   const activePanelDrag = useRef<ActivePanelDrag | null>(null)
   const activeSurfaceDrag = useRef<ActiveSurfaceDrag | null>(null)
@@ -374,6 +385,12 @@ export function App({
   const selectedPanel = useMemo(() => selectedPanelFor(panelSpecs, selectedPanelId), [selectedPanelId, panelSpecs])
   const panelVisuals = useMemo(() => createPanelVisuals(panelSpecs), [panelSpecs])
   const definitions = store.context.panels ?? EMPTY_PANEL_DEFINITIONS
+  const definitionRecord = useMemo<Readonly<Record<string, PanelDefinition>>>(() => Object.fromEntries(
+    panelSpecs.map((panel) => {
+      const definition = toPanelDefinition(panel)
+      return [definition.id, definition] as const
+    }),
+  ), [panelSpecs])
   const placements = useMemo(() => placementValues(placementState), [placementState])
   const activeSurface = selectedSurfaceFor(surfaces, placementState)
   const surfaceEdgeOverrides = store.context.gutters
@@ -410,6 +427,20 @@ export function App({
     ? EMPTY_OBSTACLE_LIST
     : obstaclesBySurface[activeSurface.id] ?? EMPTY_OBSTACLE_LIST
   const summary = useMemo(() => summarisePlacementState(placementState, store), [placementState, store])
+  const arrays = store.getArrays()
+  const selectedArray = useMemo(() => arrays.find((array) => array.id === editableGroupId), [arrays, editableGroupId])
+  const selectedArrayPlacements = useMemo<readonly PanelPlacement[]>(() => selectedArray === undefined
+    ? []
+    : selectedArray.placementIds.flatMap((id) => {
+      const placement = placementState.placements[id]
+      return placement === undefined ? [] : [placement]
+    }), [placementState.placements, selectedArray])
+  const shellArrays = useMemo<readonly ShellArray[]>(() => arrays.map((array) => ({
+    id: array.id,
+    panelId: array.panelId,
+    panelCount: array.placementIds.length,
+  })), [arrays])
+  const shellPanelOptions = useMemo<readonly ShellPanel[]>(() => panelSpecs.map(toShellPanel), [panelSpecs])
 
   const replaceSurfaces = useCallback((next: readonly SurfaceDescriptor[]): void => {
     if (sameSurfaceDescriptors(surfacesRef.current, next)) {
@@ -801,8 +832,42 @@ export function App({
     setDraggingPlacementIds([])
     setDragStartPoint(null)
     setDragPoint(null)
-    if (delta.x !== 0 || delta.y !== 0) store.moveGroup(active.placementIds, delta)
+    if (delta.x !== 0 || delta.y !== 0) {
+      const validation = store.previewMoveGroup(active.placementIds, delta)
+      const moved = validation.valid && store.moveGroup(active.placementIds, delta)
+      setInteractionNotice(moved
+        ? { text: 'Array moved.', kind: 'default' }
+        : { text: `Move blocked: ${validation.reason ?? 'This position is invalid.'}`, kind: 'error' })
+    }
   }, [pointerSurface, store])
+
+  const handlePanelContextMenu = useCallback((placement: PanelPlacement, info: PanelPointerInfo): void => {
+    const arrayId = placement.groupId ?? `single:${placement.id}`
+    const snapshot = store.getSnapshot()
+    const ids = Object.values(snapshot.placements)
+      .filter((candidate) => (candidate.groupId ?? `single:${candidate.id}`) === arrayId)
+      .map((candidate) => candidate.id)
+    store.selectPanels(ids)
+    store.setActiveSurface(placement.surfaceId)
+    setPanelContextMenu({
+      placementId: placement.id,
+      arrayId,
+      clientX: info.clientX ?? 24,
+      clientY: info.clientY ?? 24,
+    })
+  }, [store])
+
+  useEffect(() => {
+    if (panelContextMenu === null || typeof document === 'undefined') return undefined
+    const close = (): void => { setPanelContextMenu(null) }
+    const closeOnEscape = (event: KeyboardEvent): void => { if (event.key === 'Escape') close() }
+    document.addEventListener('click', close)
+    document.addEventListener('keydown', closeOnEscape)
+    return () => {
+      document.removeEventListener('click', close)
+      document.removeEventListener('keydown', closeOnEscape)
+    }
+  }, [panelContextMenu])
 
   const handleImportFiles = useCallback(async (files: readonly File[]): Promise<void> => {
     const sequence = importSequenceRef.current + 1
@@ -855,16 +920,13 @@ export function App({
 
   const handleSettings = useCallback((patch: Partial<PlacementState['settings']>): void => {
     if (editableGroupId === undefined) {
-      store.setSettings(patch)
+      if (!store.setSettings(patch)) setInteractionNotice({ text: 'No setting changed.', kind: 'default' })
       return
     }
-    if (patch.orientation !== undefined) {
-      const snapshot = store.getSnapshot()
-      const groupIds = Object.values(snapshot.placements).filter((placement) => placement.groupId === editableGroupId).map((placement) => placement.id)
-      store.setOrientation(patch.orientation, groupIds)
-      return
-    }
-    store.setGroupSettings(editableGroupId, patch)
+    const changed = store.setGroupSettings(editableGroupId, patch)
+    setInteractionNotice(changed
+      ? { text: 'Array updated.', kind: 'default' }
+      : { text: 'Change blocked: the resulting array would leave the roof, cross an opening or obstacle, or overlap another panel.', kind: 'error' })
   }, [editableGroupId, store])
   const handleSurfaceEdgeChange = useCallback((edge: SurfaceEdgeMetadata | undefined): void => {
     if (activeSurface === undefined) return
@@ -879,7 +941,37 @@ export function App({
     if (editableGroupId === undefined) return
     const snapshot = store.getSnapshot()
     const groupIds = Object.values(snapshot.placements).filter((placement) => placement.groupId === editableGroupId).map((placement) => placement.id)
-    store.rotateGroup(true, groupIds)
+    const changed = store.rotateGroup(true, groupIds)
+    setInteractionNotice(changed
+      ? { text: 'Array rotated 90°.', kind: 'default' }
+      : { text: 'Rotation blocked: there is not enough valid roof space.', kind: 'error' })
+  }, [editableGroupId, store])
+  const handleDuplicateArray = useCallback((): void => {
+    if (editableGroupId === undefined) return
+    const created = store.duplicateArray(editableGroupId)
+    setInteractionNotice(created.length > 0
+      ? { text: `Duplicated ${String(created.length)} panels as a new array.`, kind: 'default' }
+      : { text: 'Duplicate blocked: no collision-free copy fits at the proposed position.', kind: 'error' })
+  }, [editableGroupId, store])
+  const handleDeleteArray = useCallback((): void => {
+    if (editableGroupId === undefined) return
+    const deleted = store.deleteArray(editableGroupId)
+    if (deleted > 0) setInteractionNotice({ text: `Deleted array (${String(deleted)} panels). Use Undo to restore it.`, kind: 'default' })
+  }, [editableGroupId, store])
+
+  const handleArraySelect = useCallback((arrayId: string): void => {
+    const array = store.getArrays().find((candidate) => candidate.id === arrayId)
+    if (array === undefined) return
+    store.selectPanels(array.placementIds)
+  }, [store])
+
+  const handleArrayPanelChange = useCallback((panelId: string): void => {
+    if (editableGroupId === undefined) return
+    const changed = store.replaceArrayPanel(editableGroupId, panelId)
+    setInteractionNotice(changed
+      ? { text: 'Updated the panel model for the complete array.', kind: 'default' }
+      : { text: 'That panel model does not fit this array in its current position.', kind: 'error' })
+    if (changed) setSelectedPanelId(panelId)
   }, [editableGroupId, store])
 
   const autoFillReady = selectedPanel !== null && activeSurface !== undefined
@@ -934,6 +1026,7 @@ export function App({
       orientation: draft.orientation,
       clearanceM: draft.clearanceM,
       tiltDeg: draft.tiltDeg,
+      ...(draft.azimuthDeg === undefined ? {} : { azimuthDeg: draft.azimuthDeg }),
       ...(draft.groupId === undefined ? {} : { groupId: draft.groupId }),
     }]
   }, [placementState.manualPlacement])
@@ -948,7 +1041,12 @@ export function App({
       ? { ...placement, localCenter: { x: placement.localCenter.x + dragDelta.x, y: placement.localCenter.y + dragDelta.y } }
       : placement)
   }, [dragDelta, draggingPlacementIds, placements])
+  const dragValidation = useMemo(() => {
+    if (dragDelta === null || draggingPlacementIds.length === 0) return null
+    return store.previewMoveGroup(draggingPlacementIds, dragDelta)
+  }, [dragDelta, draggingPlacementIds, store])
   const draggingIds = draggingPlacementIds
+  const invalidDraggingIds = dragValidation?.valid === false ? draggingPlacementIds : []
   const renderedSummary = useMemo(() => draggingPlacementIds.length === 0
     ? summary
     : { ...summary, draggingCount: draggingPlacementIds.length }, [draggingPlacementIds.length, summary])
@@ -963,12 +1061,15 @@ export function App({
     if (panel === undefined || surface === undefined) return []
     const edge = surfaceEdges[first.surfaceId]
     return createAdjacentPanelSlots(groupPlacements, panel, editableSettings).flatMap((input, index) => {
-      const preview = store.previewPanel(input)
+      const validation = store.previewPanelResult(input)
+      const preview = validation.placement
       if (preview === undefined) return []
       return [{
         placement: { ...preview, id: `panel-slot-${String(index)}` },
         panel,
         surface,
+        valid: validation.valid,
+        ...(validation.reason === undefined ? {} : { reason: validation.reason }),
         ...(edge === undefined ? {} : { edge }),
       }]
     })
@@ -981,6 +1082,7 @@ export function App({
       orientation: slot.orientation,
       clearanceM: slot.clearanceM,
       tiltDeg: slot.tiltDeg,
+      ...(slot.azimuthDeg === undefined ? {} : { azimuthDeg: slot.azimuthDeg }),
       ...(slot.groupId === undefined ? {} : { groupId: slot.groupId }),
     })
     if (created?.groupId === undefined) return
@@ -1009,9 +1111,15 @@ export function App({
   )
   const statusMessage: string | undefined = loadError
     ?? (loadProgress !== null && loadProgress.phase !== 'complete' ? `${loadProgress.phase ?? 'Loading'} ${String(Math.round(loadProgress.progress * 100))}%` : undefined)
+    ?? (dragValidation === null
+      ? undefined
+      : dragValidation.valid
+        ? 'Release to place the array.'
+        : `Move blocked: ${dragValidation.reason ?? 'This position is invalid.'}`)
+    ?? interactionNotice?.text
     ?? importNotice
     ?? undefined
-  const statusKind: 'default' | 'progress' | 'error' = loadError !== null
+  const statusKind: 'default' | 'progress' | 'error' = loadError !== null || interactionNotice?.kind === 'error'
     ? 'error'
     : (loadProgress !== null && loadProgress.phase !== 'complete') || importNotice?.startsWith('Opening ') === true
       ? 'progress'
@@ -1020,7 +1128,10 @@ export function App({
   const selectedShellSurfaceEdge: ShellSurfaceEdge | null = activeSurface === undefined
     ? null
     : store.surfaceEdgeSummary(activeSurface.id) ?? null
-  const selectedShellPanel: ShellPanel | null = selectedPanel === null ? null : toShellPanel(selectedPanel)
+  const inspectedPanel = selectedArray === undefined
+    ? selectedPanel
+    : selectedPanelFor(panelSpecs, selectedArray.panelId)
+  const selectedShellPanel: ShellPanel | null = inspectedPanel === null ? null : toShellPanel(inspectedPanel)
 
   const sceneContent = (
     <PanelLayer
@@ -1031,6 +1142,7 @@ export function App({
       panelVisuals={panelVisuals}
       selectedIds={placementState.selectedIds}
       draggingIds={draggingIds}
+      invalidDraggingIds={invalidDraggingIds}
       ghostPlacements={ghostPlacements}
       autoFillPreview={placementState.autoFillPreview}
       interactivePreview={activeTool === 'autofill' || placementState.arrayDrag !== undefined}
@@ -1044,6 +1156,7 @@ export function App({
       onPanelDragStart={handlePanelDragStart}
       onPanelDrag={handlePanelDrag}
       onPanelDragEnd={handlePanelDragEnd}
+      onPanelContextMenu={handlePanelContextMenu}
     >
       <ObstacleLayer
         surfaces={surfaces}
@@ -1051,11 +1164,21 @@ export function App({
         draftObstacle={draftObstacle}
         draftSurfaceId={draftObstacleSurfaceId}
       />
-      <PanelSlotOutlines slots={panelSlotOutlines} onAdd={handleAddPanelSlot} />
+      {activeTool !== 'place' && activeTool !== 'obstacle' ? (
+        <ArrayCanvasHandles
+          placements={selectedArrayPlacements}
+          panelDefinitions={definitionRecord}
+          surfaces={surfaces}
+          onMove={handleMoveArray}
+          onRotate={handleRotateArray}
+        />
+      ) : null}
+      <PanelSlotOutlines slots={panelSlotOutlines} onAdd={handleAddPanelSlot} onRejected={(reason) => { setInteractionNotice({ text: reason, kind: 'error' }) }} />
     </PanelLayer>
   )
 
   return (
+    <>
     <Shell
       projectName={modelMetadata?.name ?? source?.name ?? projectName}
       viewer={(
@@ -1106,6 +1229,12 @@ export function App({
       selectedSurfaceEdge={selectedShellSurfaceEdge}
       onSurfaceEdgeChange={handleSurfaceEdgeChange}
       selectedPanel={selectedShellPanel}
+      panelOptions={shellPanelOptions}
+      arrays={shellArrays}
+      selectedArrayId={editableGroupId}
+      onArraySelect={handleArraySelect}
+      onArrayPanelChange={editableGroupId === undefined ? undefined : handleArrayPanelChange}
+      onAddSelectedPanel={selectedPanel === null ? undefined : () => { registerAndArmPanel(selectedPanel) }}
       placements={placements}
       selectedPlacementIds={placementState.selectedIds}
       placementSummary={renderedSummary}
@@ -1122,6 +1251,8 @@ export function App({
       onNudgeSelection={handleNudge}
       onMoveSelection={editableGroupId === undefined ? undefined : handleMoveArray}
       onRotateSelection={editableGroupId === undefined ? undefined : handleRotateArray}
+      onDuplicateSelection={editableGroupId === undefined ? undefined : handleDuplicateArray}
+      onDeleteArray={editableGroupId === undefined ? undefined : handleDeleteArray}
       onAutoFill={autoFillReady ? handleAutoFill : undefined}
       obstacles={activeObstacles}
       draftObstacle={draftObstacle}
@@ -1144,5 +1275,32 @@ export function App({
       initialRenderMode={initialRenderMode}
       initialShowGrid={initialShowGrid}
     />
+    {panelContextMenu === null ? null : (
+      <div
+        className="panel-context-menu"
+        role="menu"
+        aria-label="Panel actions"
+        style={{ left: panelContextMenu.clientX, top: panelContextMenu.clientY }}
+        onClick={(event) => { event.stopPropagation() }}
+        onContextMenu={(event) => { event.preventDefault() }}
+      >
+        <button type="button" role="menuitem" onClick={() => {
+          const deleted = store.deletePanel(panelContextMenu.placementId)
+          setInteractionNotice(deleted ? { text: 'Panel deleted. Undo is available.', kind: 'default' } : { text: 'Panel could not be deleted.', kind: 'error' })
+          setPanelContextMenu(null)
+        }}>Delete panel</button>
+        <button type="button" role="menuitem" onClick={() => {
+          const deleted = store.deleteArray(panelContextMenu.arrayId)
+          setInteractionNotice(deleted > 0 ? { text: `Array deleted (${String(deleted)} panels). Undo is available.`, kind: 'default' } : { text: 'Array could not be deleted.', kind: 'error' })
+          setPanelContextMenu(null)
+        }}>Delete array</button>
+        <button type="button" role="menuitem" onClick={() => {
+          const duplicated = store.duplicateArray(panelContextMenu.arrayId)
+          setInteractionNotice(duplicated.length > 0 ? { text: `Array duplicated (${String(duplicated.length)} panels).`, kind: 'default' } : { text: 'Duplicate blocked: there is no valid free position beside this array.', kind: 'error' })
+          setPanelContextMenu(null)
+        }}>Duplicate array</button>
+      </div>
+    )}
+    </>
   )
 }

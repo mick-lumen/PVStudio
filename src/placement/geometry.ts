@@ -315,9 +315,31 @@ export function rectangleInsidePolygon(rectangle: unknown, polygon: unknown, set
 }
 
 export function rectangleInsideSurfaceRegion(rectangle: unknown, region: unknown, setbackM: unknown): boolean {
-  return isPolygon(region)
-    ? rectangleInsidePolygon(rectangle, region.points, setbackM)
-    : isRect(region) && rectangleInsideRegion(rectangle, region, setbackM)
+  if (!isPolygon(region)) return isRect(region) && rectangleInsideRegion(rectangle, region, setbackM)
+  if (!rectangleInsidePolygon(rectangle, region.points, setbackM)) return false
+  const candidate = normaliseRect(rectangle)
+  const setback = typeof setbackM === 'number' && Number.isFinite(setbackM) ? setbackM : -1
+  if (candidate === undefined || setback < 0) return false
+  const candidateCorners = rectangleCorners(candidate)
+  const candidateEdges = rectangleEdges(candidate)
+  for (const hole of region.holes ?? []) {
+    if (candidateCorners.some((corner) => pointInPolygon(corner, hole))) return false
+    if (hole.some((point) => point.x >= candidate.x - GEOMETRY_EPSILON
+      && point.x <= candidate.x + candidate.width + GEOMETRY_EPSILON
+      && point.y >= candidate.y - GEOMETRY_EPSILON
+      && point.y <= candidate.y + candidate.height + GEOMETRY_EPSILON)) return false
+    for (let index = 0; index < hole.length; index += 1) {
+      const start = hole[index]
+      const end = hole[(index + 1) % hole.length]
+      if (start === undefined || end === undefined) continue
+      for (const [edgeStart, edgeEnd] of candidateEdges) {
+        if (segmentsIntersect(start, end, edgeStart, edgeEnd)) return false
+        if (setback > GEOMETRY_EPSILON
+          && segmentDistanceSquared(start, end, edgeStart, edgeEnd) < setback * setback - GEOMETRY_EPSILON) return false
+      }
+    }
+  }
+  return true
 }
 
 /** Local axes used by placement rows and panel poses.
@@ -333,6 +355,19 @@ export interface SurfaceEdgeAxes {
   readonly rowAxis: Point2
   readonly crossAxis: Point2
   readonly traversalSign: 1 | -1
+}
+
+/** Rotate a logical surface basis clockwise by an authored array azimuth. */
+export function rotateSurfaceEdgeAxes(axes: SurfaceEdgeAxes, azimuthDeg = 0): SurfaceEdgeAxes {
+  if (!Number.isFinite(azimuthDeg)) return axes
+  const radians = azimuthDeg * Math.PI / 180
+  const cosine = Math.cos(radians)
+  const sine = Math.sin(radians)
+  const rotate = (point: Point2): Point2 => ({
+    x: canonicalZero(point.x * cosine - point.y * sine),
+    y: canonicalZero(point.x * sine + point.y * cosine),
+  })
+  return { rowAxis: rotate(axes.rowAxis), crossAxis: rotate(axes.crossAxis), traversalSign: axes.traversalSign }
 }
 
 const canonicalZero = (value: number): number => (value === 0 ? 0 : value)
@@ -568,13 +603,13 @@ const pointInsideSurfaceRegion = (point: Point2, region: SurfaceDescriptor['regi
   }
   if (!isPolygon(region)) return false
   if (!pointInPolygon(point, region.points)) return false
+  if ((region.holes ?? []).some((hole) => pointInPolygon(point, hole))) return false
+  const rings = [region.points, ...(region.holes ?? [])]
   if (setbackM <= GEOMETRY_EPSILON) return true
-  const minimumDistanceSquared = region.points.reduce((minimum, start, index) => {
-    const end = region.points[(index + 1) % region.points.length]
-    return end === undefined
-      ? minimum
-      : Math.min(minimum, pointToSegmentDistanceSquared(point, start, end))
-  }, Number.POSITIVE_INFINITY)
+  const minimumDistanceSquared = rings.reduce((ringMinimum, ring) => Math.min(ringMinimum, ring.reduce((minimum, start, index) => {
+    const end = ring[(index + 1) % ring.length]
+    return end === undefined ? minimum : Math.min(minimum, pointToSegmentDistanceSquared(point, start, end))
+  }, Number.POSITIVE_INFINITY)), Number.POSITIVE_INFINITY)
   return minimumDistanceSquared >= setbackM * setbackM - GEOMETRY_EPSILON
 }
 
@@ -595,14 +630,17 @@ export const orientedCandidateInsideRegion = (
     const end = corners[(index + 1) % corners.length] ?? start
     return [start, end]
   })
-  for (let index = 0; index < region.points.length; index += 1) {
-    const start = region.points[index]
-    const end = region.points[(index + 1) % region.points.length]
-    if (start === undefined || end === undefined) continue
-    for (const [edgeStart, edgeEnd] of orientedEdges) {
-      if (properSegmentsIntersect(start, end, edgeStart, edgeEnd)) return false
-      if (setbackM > GEOMETRY_EPSILON
-        && segmentDistanceSquared(start, end, edgeStart, edgeEnd) < setbackM * setbackM - GEOMETRY_EPSILON) return false
+  for (const ring of [region.points, ...(region.holes ?? [])]) {
+    if (ring.some((point) => pointInPolygon(point, corners))) return false
+    for (let index = 0; index < ring.length; index += 1) {
+      const start = ring[index]
+      const end = ring[(index + 1) % ring.length]
+      if (start === undefined || end === undefined) continue
+      for (const [edgeStart, edgeEnd] of orientedEdges) {
+        if (segmentsIntersect(start, end, edgeStart, edgeEnd)) return false
+        if (setbackM > GEOMETRY_EPSILON
+          && segmentDistanceSquared(start, end, edgeStart, edgeEnd) < setbackM * setbackM - GEOMETRY_EPSILON) return false
+      }
     }
   }
   return true

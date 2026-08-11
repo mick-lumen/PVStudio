@@ -5,7 +5,7 @@ import type {
   SurfaceDescriptor,
 } from '../core'
 import { PANEL_CATALOG, toPanelDefinition, type PanelSpec } from '../data'
-import type { PlacementState, PlacementStore } from '../placement'
+import type { PlacementState } from '../placement'
 import type { PanelVisualProperties } from '../rendering'
 import type {
   PanelPlacementSummary,
@@ -88,16 +88,23 @@ export interface AppPlacementTotals {
 
 export interface PlacementTotalsStore {
   totals(ids?: unknown): AppPlacementTotals
+  getArrays?(): readonly { readonly id: string; readonly placementIds: readonly string[] }[]
 }
 
 /** Derive truthful, accessible placement metrics without touching Three.js. */
 export function summarisePlacementState(
   state: Readonly<PlacementState>,
-  store: PlacementTotalsStore | Pick<PlacementStore, 'totals'>,
+  store: PlacementTotalsStore,
 ): AppPlacementSummary {
   const totals = store.totals()
   const previewCount = state.autoFillPreview?.candidates.length ?? 0
   const draggingCount = state.arrayDrag === undefined && state.manualPlacement === undefined ? 0 : 1
+  const arrays = store.getArrays?.() ?? []
+  const selectedGroups = new Set(state.selectedIds.map((id) => {
+    const placement = state.placements[id]
+    return placement === undefined ? undefined : placement.groupId ?? `single:${placement.id}`
+  }).filter((id): id is string => id !== undefined))
+  const selectedArray = selectedGroups.size === 1 ? arrays.find((array) => selectedGroups.has(array.id)) : undefined
   return {
     count: totals.count,
     selectedCount: state.selectedIds.length,
@@ -105,6 +112,9 @@ export function summarisePlacementState(
     draggingCount,
     totalWattageW: totals.wattageW,
     totalKwp: totals.kwp,
+    arrayCount: arrays.length,
+    selectedArrayPanelCount: selectedArray?.placementIds.length ?? 0,
+    individualSelectedCount: state.selectedIds.length,
   }
 }
 

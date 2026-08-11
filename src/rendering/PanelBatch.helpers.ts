@@ -11,7 +11,7 @@ import type { PanelInteractionHandler, PanelPointerInfo } from './types'
  * it contributes no draw calls (rather than a full count of zero-scaled
  * instances).
  */
-export const PANEL_VISUAL_STATE_ORDER: readonly PanelVisualState[] = ['placed', 'selected', 'ghost']
+export const PANEL_VISUAL_STATE_ORDER: readonly PanelVisualState[] = ['placed', 'selected', 'ghost', 'invalid']
 
 /**
  * Compact location for one item in a visual-state instanced mesh.  The

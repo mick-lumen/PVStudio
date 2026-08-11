@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, render } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import type { PanelDefinition, PanelPlacement, SurfaceDescriptor } from '../core'
 import { PanelSlotOutlines } from './PanelSlotOutlines'
@@ -13,8 +13,10 @@ const placement: PanelPlacement = { id: 'slot-1', panelId: 'p', surfaceId: 'roof
 describe('PanelSlotOutlines', () => {
   it('renders one interactive outline per candidate', () => {
     const onAdd = vi.fn()
-    render(<PanelSlotOutlines slots={[{ placement, panel, surface }]} onAdd={onAdd} />)
-    fireEvent.pointerDown(screen.getByTestId('panel-slot'), { button: 0 })
+    const { container } = render(<PanelSlotOutlines slots={[{ placement, panel, surface }]} onAdd={onAdd} />)
+    const slot = container.querySelectorAll('group').item(1)
+    expect(slot).not.toBeNull()
+    fireEvent.pointerDown(slot, { button: 0 })
     expect(onAdd).toHaveBeenCalledWith(placement)
   })
 })

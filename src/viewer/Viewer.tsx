@@ -48,6 +48,16 @@ import type { LoadedViewerModel } from './internalTypes'
 // noisy survey mesh from publishing tens of thousands of unusable patches.
 const MINIMUM_DESIGN_SURFACE_AREA_M2 = 1
 
+function configuredPositiveNumber(value: string | undefined): number | undefined {
+  if (value === undefined || value.trim() === '') return undefined
+  const parsed = Number(value)
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined
+}
+
+const SURFACE_NORMAL_ANGLE_TOLERANCE_DEG = configuredPositiveNumber(import.meta.env.VITE_SURFACE_NORMAL_ANGLE_TOLERANCE_DEG)
+const SURFACE_PLANE_TOLERANCE_M = configuredPositiveNumber(import.meta.env.VITE_SURFACE_PLANE_TOLERANCE_M)
+const SURFACE_JOIN_TOLERANCE_M = configuredPositiveNumber(import.meta.env.VITE_SURFACE_JOIN_TOLERANCE_M)
+
 interface ViewerModelState {
   readonly loaded: LoadedViewerModel
   /** The model and its design-surface index are published atomically. */
@@ -784,6 +794,7 @@ export function Viewer(props: ViewerProps): ReactNode {
   const [progress, setProgress] = useState<ViewerLoadProgress | null>(null)
   const [error, setError] = useState<Error | null>(null)
   const [selected, setSelected] = useState<readonly ViewerSurfaceHit[]>([])
+  const [surfaceEditStatus, setSurfaceEditStatus] = useState<string | null>(null)
   const [cameraMetrics, setCameraMetrics] = useState<ViewerCameraMetrics | null>(null)
   const [webglAvailable] = useState(detectWebGL)
   const selectedRef = useRef<readonly ViewerSurfaceHit[]>([])
@@ -796,6 +807,7 @@ export function Viewer(props: ViewerProps): ReactNode {
     setModel(null)
     selectedRef.current = []
     setSelected([])
+    setSurfaceEditStatus(null)
     setCameraMetrics(null)
     setError(null)
     setProgress(nextProgress)
@@ -839,6 +851,9 @@ export function Viewer(props: ViewerProps): ReactNode {
             chunkSize: 2560,
             minimumSurfaceAreaM2: MINIMUM_DESIGN_SURFACE_AREA_M2,
             deferRaycastGrids: true,
+            ...(SURFACE_NORMAL_ANGLE_TOLERANCE_DEG === undefined ? {} : { normalAngleToleranceDeg: SURFACE_NORMAL_ANGLE_TOLERANCE_DEG }),
+            ...(SURFACE_PLANE_TOLERANCE_M === undefined ? {} : { planeToleranceM: SURFACE_PLANE_TOLERANCE_M }),
+            ...(SURFACE_JOIN_TOLERANCE_M === undefined ? {} : { joinToleranceM: SURFACE_JOIN_TOLERANCE_M }),
           }),
           buildDescriptors: (index) => index.surfaceDescriptorsAsync({ signal: controller.signal, chunkSize: 2560 }),
           onReady: (index, surfaces) => {
@@ -918,6 +933,27 @@ export function Viewer(props: ViewerProps): ReactNode {
     setSelected([])
     callbacksRef.current.onSurfaceSelect?.(null, { shiftKey: false, selectedSurfaceIds: [] })
   }, [])
+  const editSurfaceTopology = useCallback(async (operation: 'merge' | 'split'): Promise<void> => {
+    const index = model?.index
+    if (index === null || index === undefined) return
+    const ids = selectedRef.current.map((entry) => entry.selection.surface.id)
+    const changed = operation === 'merge'
+      ? index.mergeSurfaceIds(ids)
+      : ids[0] !== undefined && index.splitSurfaceId(ids[0])
+    if (!changed) {
+      setSurfaceEditStatus(operation === 'merge'
+        ? 'Merge rejected: select two or more coplanar roof pieces with Shift.'
+        : 'Split unavailable: this roof is already one source surface.')
+      return
+    }
+    const next = await index.surfaceDescriptorsAsync({ chunkSize: 2560 })
+    setModel((current) => current === null ? null : { ...current, surfaceCount: next.length })
+    selectedRef.current = []
+    setSelected([])
+    callbacksRef.current.onSurfaceSelect?.(null, { shiftKey: false, selectedSurfaceIds: [] })
+    callbacksRef.current.onSurfacesChange?.(next)
+    setSurfaceEditStatus(operation === 'merge' ? 'Roof pieces merged into one logical plane.' : 'Logical roof split into its source pieces.')
+  }, [model])
   const handleSurfacePointer = useCallback((event: ViewerSurfacePointerEvent): void => {
     callbacksRef.current.onSurfacePointer?.(event)
   }, [])
@@ -932,6 +968,11 @@ export function Viewer(props: ViewerProps): ReactNode {
         {model !== null && <ViewerScene model={model} progress={progress} cameraMode={cameraMode} renderMode={renderMode} surfaceInteractionMode={surfaceInteractionMode} surfaceGestureActive={surfaceGestureActive} showGrid={showGrid} sceneContent={<>{sceneContent}{children}</>} shadows={shadows} selected={selected} onSurfaceHit={handleSurfaceHit} onSurfacePointer={handleSurfacePointer} onSurfaceMiss={clearSelection} onCameraMetrics={setCameraMetrics} />}
       </Canvas>
       {model !== null && <MetadataOverlay metadata={model.loaded.metadata} surfaceCount={model.surfaceCount} />}
+      {model !== null && selected.length > 0 && surfaceInteractionMode === 'select' ? <div className="pv-viewer__surface-tools" aria-label="Roof plane tools">
+        <button type="button" disabled={selected.length < 2} onClick={() => { void editSurfaceTopology('merge') }}>Merge roof planes</button>
+        <button type="button" disabled={selected.length !== 1} onClick={() => { void editSurfaceTopology('split') }}>Split roof plane</button>
+      </div> : null}
+      {surfaceEditStatus === null ? null : <div className="pv-viewer__surface-edit-status" role="status">{surfaceEditStatus}</div>}
       <ViewModeButtons cameraMode={cameraMode} renderMode={renderMode} onCameraModeChange={setCameraMode} onRenderModeChange={setRenderMode} />
       {showCompass && <CompassOverlay northAngleDeg={cameraMetrics?.northAngleDeg ?? 0} />}
       {showScale && model !== null && <ScaleOverlay metrics={cameraMetrics} />}

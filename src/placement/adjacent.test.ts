@@ -35,4 +35,13 @@ describe('createAdjacentPanelSlots', () => {
     expect(slots.map((slot) => slot.localCenter)).toContainEqual({ x: 4.1, y: 2 })
     expect(slots.map((slot) => slot.localCenter)).toContainEqual({ x: 2, y: 3.2 })
   })
+
+  it('rotates every adjacent outline with the complete array azimuth', () => {
+    const rotated = { ...placement('a', 2, 2), azimuthDeg: 90 }
+    const slots = createAdjacentPanelSlots([rotated], panel, { ...settings, azimuthDeg: 90 })
+    expect(slots.map((slot) => slot.localCenter.x)).toEqual(expect.arrayContaining([2, 2]))
+    expect(slots.some((slot) => Math.abs(slot.localCenter.y - 0.9) < 1e-9)).toBe(true)
+    expect(slots.some((slot) => Math.abs(slot.localCenter.y - 3.1) < 1e-9)).toBe(true)
+    expect(slots.every((slot) => slot.azimuthDeg === 90)).toBe(true)
+  })
 })

@@ -26,6 +26,7 @@ export function PanelLayer(props: PanelLayerProps): ReactNode {
     surfaceEdges,
     selectedIds,
     draggingIds,
+    invalidDraggingIds,
     ghostPlacements,
     autoFillPreview,
     interactivePreview,
@@ -34,6 +35,7 @@ export function PanelLayer(props: PanelLayerProps): ReactNode {
     onPanelDragStart,
     onPanelDrag,
     onPanelDragEnd,
+    onPanelContextMenu,
     children,
     name = 'pv-panel-layer',
   } = props
@@ -49,6 +51,7 @@ export function PanelLayer(props: PanelLayerProps): ReactNode {
     surfaceEdges,
     selectedIds,
     draggingIds,
+    invalidDraggingIds,
     ghostPlacements,
     autoFillPreview,
     interactivePreview,
@@ -59,7 +62,7 @@ export function PanelLayer(props: PanelLayerProps): ReactNode {
     // boundary rather than the visual state alone here.
     const isCursorGhost = cursorGhostIds.has(item.id)
     return isCursorGhost || item.source === 'preview' ? { ...item, interactive: false } : item
-  }), [autoFillPreview, cursorGhostIds, draggingIds, ghostPlacements, interactivePreview, panelDefinitions, panelVisuals, placements, selectedIds, surfaceEdges, surfaces])
+  }), [autoFillPreview, cursorGhostIds, draggingIds, ghostPlacements, interactivePreview, invalidDraggingIds, panelDefinitions, panelVisuals, placements, selectedIds, surfaceEdges, surfaces])
   const batches = useMemo(() => groupPanelRenderItems(items), [items])
 
   // While a preview is active, all preview meshes are inert.  This keeps a
@@ -79,6 +82,7 @@ export function PanelLayer(props: PanelLayerProps): ReactNode {
           onPanelDragStart={onPanelDragStart}
           onPanelDrag={onPanelDrag}
           onPanelDragEnd={onPanelDragEnd}
+          onPanelContextMenu={onPanelContextMenu}
         />
       ))}
       {children}

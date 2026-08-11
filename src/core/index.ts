@@ -4,6 +4,7 @@ export type {
   AutoFillRequest,
   Orientation,
   PanelDefinition,
+  PanelArray,
   PanelFootprint,
   PanelGroupSettings,
   PanelPlacement,

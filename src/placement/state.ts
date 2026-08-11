@@ -15,6 +15,7 @@ import {
   type AutoFillRequest,
   type Orientation,
   type PanelDefinition,
+  type PanelArray,
   type PanelGroupSettings,
   type PanelPlacement,
   type Point2,
@@ -44,11 +45,12 @@ import {
   orientedObstacleOverlap,
   polygonOverlap,
   pointOnSurface,
-  rectangleInsideSurfaceRegion,
   rectangleCorners,
   rectanglesOverlap,
   rectanglesOverlapWithSpacing,
+  rotateSurfaceEdgeAxes,
 } from './geometry'
+import { derivePanelArrays } from './arrays'
 
 const isFinitePoint = (point: unknown): point is Point2 => isPoint2(point)
 const clonePoint = (point: Point2): Point2 => ({ x: point.x, y: point.y })
@@ -87,12 +89,16 @@ const mergeSettings = (base: PanelGroupSettings, patch: unknown): PanelGroupSett
   // (keep the inherited value) from an explicit `undefined` (clear the value).
   // The inspector uses the latter when a user returns a field to its legacy
   // automatic mode. Required settings retain the usual nullish merge below.
-  const optionalSetting = <K extends 'modulesPerRow' | 'rowOffsetM' | 'obstacleClearanceM'>(
+  const optionalSetting = <K extends 'modulesPerRow' | 'modulesPerColumn' | 'azimuthDeg' | 'horizontalGroupSpacingM' | 'verticalGroupSpacingM' | 'rowOffsetM' | 'obstacleClearanceM'>(
     key: K,
   ): PanelGroupSettings[K] => Object.prototype.hasOwnProperty.call(safePatch, key)
     ? safePatch[key]
     : base[key]
   const modulesPerRow = optionalSetting('modulesPerRow')
+  const modulesPerColumn = optionalSetting('modulesPerColumn')
+  const azimuthDeg = optionalSetting('azimuthDeg')
+  const horizontalGroupSpacingM = optionalSetting('horizontalGroupSpacingM')
+  const verticalGroupSpacingM = optionalSetting('verticalGroupSpacingM')
   const rowOffsetM = optionalSetting('rowOffsetM')
   const obstacleClearanceM = optionalSetting('obstacleClearanceM')
   const candidate: PanelGroupSettings = {
@@ -102,7 +108,11 @@ const mergeSettings = (base: PanelGroupSettings, patch: unknown): PanelGroupSett
     setbackM: safePatch.setbackM ?? base.setbackM,
     clearanceM: safePatch.clearanceM ?? base.clearanceM,
     tiltDeg: safePatch.tiltDeg ?? base.tiltDeg,
+    ...(azimuthDeg === undefined ? {} : { azimuthDeg }),
     ...(modulesPerRow === undefined ? {} : { modulesPerRow }),
+    ...(modulesPerColumn === undefined ? {} : { modulesPerColumn }),
+    ...(horizontalGroupSpacingM === undefined ? {} : { horizontalGroupSpacingM }),
+    ...(verticalGroupSpacingM === undefined ? {} : { verticalGroupSpacingM }),
     ...(rowOffsetM === undefined ? {} : { rowOffsetM }),
     ...(obstacleClearanceM === undefined ? {} : { obstacleClearanceM }),
   }
@@ -117,7 +127,11 @@ const settingsEqual = (first: PanelGroupSettings, second: PanelGroupSettings): b
   && first.setbackM === second.setbackM
   && first.clearanceM === second.clearanceM
   && first.tiltDeg === second.tiltDeg
+  && first.azimuthDeg === second.azimuthDeg
   && first.modulesPerRow === second.modulesPerRow
+  && first.modulesPerColumn === second.modulesPerColumn
+  && first.horizontalGroupSpacingM === second.horizontalGroupSpacingM
+  && first.verticalGroupSpacingM === second.verticalGroupSpacingM
   && first.rowOffsetM === second.rowOffsetM
   && first.obstacleClearanceM === second.obstacleClearanceM
 const clonePanel = (panel: PanelDefinition): PanelDefinition => ({ ...panel })
@@ -131,7 +145,10 @@ function cloneRegion(region: unknown): SurfaceRegion | undefined
 function cloneRegion(region: unknown): SurfaceRegion | undefined {
   if (!isSurfaceRegion(region)) return undefined
   return 'points' in region
-    ? { points: region.points.map(clonePoint) }
+    ? {
+        points: region.points.map(clonePoint),
+        ...(region.holes === undefined ? {} : { holes: region.holes.map((hole) => hole.map(clonePoint)) }),
+      }
     : { ...region }
 }
 
@@ -245,6 +262,7 @@ export interface ManualPlacementDraft {
   readonly orientation: Orientation
   readonly clearanceM: number
   readonly tiltDeg: number
+  readonly azimuthDeg?: number
   readonly groupId?: string
 }
 
@@ -324,8 +342,15 @@ export interface AddPlacementInput {
   readonly orientation?: Orientation
   readonly clearanceM?: number
   readonly tiltDeg?: number
+  readonly azimuthDeg?: number
   readonly groupId?: string
   readonly id?: string
+}
+
+export interface PanelPlacementValidation {
+  readonly placement?: PanelPlacement
+  readonly valid: boolean
+  readonly reason?: string
 }
 
 export interface PlacementTransform {
@@ -469,12 +494,13 @@ const equalValue = (first: unknown, second: unknown): boolean => {
 
 const panelRect = (placement: PanelPlacement, panel: PanelDefinition): Rect => {
   const footprint = orientedFootprint(panel, placement.orientation)
-  return {
-    x: placement.localCenter.x - footprint.widthM / 2,
-    y: placement.localCenter.y - footprint.heightM / 2,
-    width: footprint.widthM,
-    height: footprint.heightM,
-  }
+  const axes = rotateSurfaceEdgeAxes({ rowAxis: { x: 1, y: 0 }, crossAxis: { x: 0, y: 1 }, traversalSign: 1 }, placement.azimuthDeg ?? 0)
+  const corners = orientedFootprintCorners(placement.localCenter, footprint.widthM, footprint.heightM, axes)
+  const xs = corners.map((point) => point.x)
+  const ys = corners.map((point) => point.y)
+  const minX = Math.min(...xs)
+  const minY = Math.min(...ys)
+  return { x: minX, y: minY, width: Math.max(...xs) - minX, height: Math.max(...ys) - minY }
 }
 
 /** Convert the backwards-compatible gutter record into the strict edge shape
@@ -520,21 +546,23 @@ const pairwiseSpacingConflict = (
   // pair whose edge gap is exactly the requested spacing remains valid.
   const horizontal = Math.max(0, Math.max(settingsFirst.interPanelSpacingM, settingsSecond.interPanelSpacingM) - 2 * GEOMETRY_EPSILON)
   const vertical = Math.max(0, Math.max(settingsFirst.rowSpacingM, settingsSecond.rowSpacingM) - 2 * GEOMETRY_EPSILON)
-  if (surface !== undefined && edge !== undefined) {
-    const axes = deriveSurfaceEdgeAxes(edge, surface.region)
+  if (surface !== undefined) {
+    const baseAxes = deriveSurfaceEdgeAxes(edge, surface.region)
+    const firstAxes = rotateSurfaceEdgeAxes(baseAxes, first.azimuthDeg ?? settingsFirst.azimuthDeg ?? 0)
+    const secondAxes = rotateSurfaceEdgeAxes(baseAxes, second.azimuthDeg ?? settingsSecond.azimuthDeg ?? 0)
     const firstFootprint = orientedFootprint(panelFirst, first.orientation)
     const secondFootprint = orientedFootprint(panelSecond, second.orientation)
     const firstCorners = orientedFootprintCorners(
       first.localCenter,
       firstFootprint.widthM + 2 * horizontal,
       firstFootprint.heightM + 2 * vertical,
-      axes,
+      firstAxes,
     )
     const secondCorners = orientedFootprintCorners(
       second.localCenter,
       secondFootprint.widthM,
       secondFootprint.heightM,
-      axes,
+      secondAxes,
     )
     return polygonOverlap(firstCorners, secondCorners)
   }
@@ -1263,6 +1291,10 @@ export class PlacementStore {
 
   public getState(): Readonly<PlacementState> { return this.state }
 
+  public getArrays(): readonly PanelArray[] {
+    return derivePanelArrays(this.state.placements, this.state.groupSettings, this.state.settings)
+  }
+
   public snapshot(): PlacementSnapshot {
     return cloneSnapshot({
       placements: this.state.placements,
@@ -1310,41 +1342,36 @@ export class PlacementStore {
     return true
   }
 
-  private canPlace(
+  private placementRejectionReason(
     placement: PanelPlacement,
     ignoredIds: ReadonlySet<string> = new Set<string>(),
     settingsOverride?: PanelGroupSettings,
     obstaclesOverride?: readonly RectangularObstacle[],
     edgeOverride?: SurfaceEdgeMetadata,
     regionOverride?: SurfaceRegion,
-  ): boolean {
+  ): string | undefined {
     const panel = this.definitions[placement.panelId]
     const surface = this.surface(placement.surfaceId)
-    if (!validPanel(panel) || surface === undefined || normalisePlacement(placement) === undefined) return false
+    if (!validPanel(panel) || surface === undefined || normalisePlacement(placement) === undefined) return 'Panel data is invalid.'
     const settings = settingsOverride ?? this.settingsFor(placement.groupId)
-    if (!validSettings(settings) || !isValidSurfaceDescriptor(surface)) return false
+    if (!validSettings(settings) || !isValidSurfaceDescriptor(surface)) return 'The roof surface or array settings are invalid.'
     const region = regionOverride ?? surface.region
-    if (!isSurfaceRegion(region) || boundsOfRegion(region) === undefined) return false
+    if (!isSurfaceRegion(region) || boundsOfRegion(region) === undefined) return 'The roof boundary is invalid.'
     const edge = edgeOverride ?? edgeMetadataFromGutter(this.surfaceEdge(placement.surfaceId))
-    const axes = edge === undefined ? undefined : deriveSurfaceEdgeAxes(edge, region)
+    const axes = rotateSurfaceEdgeAxes(deriveSurfaceEdgeAxes(edge, region), placement.azimuthDeg ?? settings.azimuthDeg ?? 0)
     const footprint = orientedFootprint(panel, placement.orientation)
-    const rectangle = panelRect(placement, panel)
-    const fits = axes === undefined
-      ? rectangleInsideSurfaceRegion(rectangle, region, settings.setbackM)
-      : orientedCandidateInsideRegion(placement.localCenter, footprint.widthM, footprint.heightM, region, axes, settings.setbackM)
-    if (!fits) return false
+    const fits = orientedCandidateInsideRegion(placement.localCenter, footprint.widthM, footprint.heightM, region, axes, settings.setbackM)
+    if (!fits) return 'Panel is outside the roof boundary, crosses an opening, or violates the edge setback.'
     const obstacles = obstaclesOverride ?? this.obstaclesFor(placement.surfaceId)
-    if (obstacles === undefined || obstacles.some((obstacle) => !isRectangularObstacle(obstacle))) return false
+    if (obstacles === undefined || obstacles.some((obstacle) => !isRectangularObstacle(obstacle))) return 'The roof obstacle data is invalid.'
     const obstacleClearanceM = settings.obstacleClearanceM ?? 0
-    if (axes === undefined) {
-      if (obstacles.some((obstacle) => rectanglesOverlap(rectangle, expandedObstacle(obstacle, obstacleClearanceM)))) return false
-    } else if (obstacles.some((obstacle) => orientedObstacleOverlap(
+    if (obstacles.some((obstacle) => orientedObstacleOverlap(
       placement.localCenter,
       footprint.widthM,
       footprint.heightM,
       expandedObstacle(obstacle, obstacleClearanceM),
       axes,
-    ))) return false
+    ))) return 'Panel conflicts with an obstacle or its required clearance.'
     // A generated request may intentionally target a strict subregion of the
     // surface. Use that same region when resolving ridge/interior edge axes
     // for pairwise checks, otherwise preview and confirm can disagree even
@@ -1353,7 +1380,7 @@ export class PlacementStore {
     for (const existing of Object.values(this.state.placements)) {
       if (ignoredIds.has(existing.id) || existing.id === placement.id || existing.surfaceId !== placement.surfaceId) continue
       const existingPanel = this.definitions[existing.panelId]
-      if (!validPanel(existingPanel)) return false
+      if (!validPanel(existingPanel)) return 'An existing panel has invalid model data.'
       const existingSettings = this.settingsFor(existing.groupId)
       if (pairwiseSpacingConflict(
         placement,
@@ -1364,9 +1391,27 @@ export class PlacementStore {
         existingSettings,
         pairwiseSurface,
         edge,
-      )) return false
+      )) return 'Panel overlaps another panel or violates the required module spacing.'
     }
-    return true
+    return undefined
+  }
+
+  private canPlace(
+    placement: PanelPlacement,
+    ignoredIds: ReadonlySet<string> = new Set<string>(),
+    settingsOverride?: PanelGroupSettings,
+    obstaclesOverride?: readonly RectangularObstacle[],
+    edgeOverride?: SurfaceEdgeMetadata,
+    regionOverride?: SurfaceRegion,
+  ): boolean {
+    return this.placementRejectionReason(
+      placement,
+      ignoredIds,
+      settingsOverride,
+      obstaclesOverride,
+      edgeOverride,
+      regionOverride,
+    ) === undefined
   }
 
   private makePlacement(input: AddPlacementInput, id: string): PanelPlacement | undefined {
@@ -1378,7 +1423,9 @@ export class PlacementStore {
     const orientation = input.orientation ?? settings.orientation
     const clearanceM = input.clearanceM ?? settings.clearanceM
     const tiltDeg = input.tiltDeg ?? settings.tiltDeg
-    if (!isOrientation(orientation) || !Number.isFinite(clearanceM) || clearanceM < 0 || !Number.isFinite(tiltDeg) || tiltDeg < 0 || tiltDeg > 90) return undefined
+    const azimuthDeg = input.azimuthDeg ?? settings.azimuthDeg
+    if (!isOrientation(orientation) || !Number.isFinite(clearanceM) || clearanceM < 0 || !Number.isFinite(tiltDeg) || tiltDeg < 0 || tiltDeg > 90
+      || (azimuthDeg !== undefined && !Number.isFinite(azimuthDeg))) return undefined
     return {
       id,
       panelId: input.panelId,
@@ -1387,6 +1434,7 @@ export class PlacementStore {
       orientation,
       clearanceM,
       tiltDeg,
+      ...(azimuthDeg === undefined ? {} : { azimuthDeg }),
       ...(input.groupId === undefined ? {} : { groupId: input.groupId }),
     }
   }
@@ -1420,13 +1468,23 @@ export class PlacementStore {
 
   /** Validate a prospective panel without changing selection, history or ids. */
   public previewPanel(input: unknown): PanelPlacement | undefined {
+    const result = this.previewPanelResult(input)
+    return result.valid ? result.placement : undefined
+  }
+
+  /** Explain whether a prospective panel can be placed without mutating design state. */
+  public previewPanelResult(input: unknown): PanelPlacementValidation {
     if (!isRecord(input) || !validString(input.panelId) || !isFinitePoint(input.localCenter)
       || (input.surfaceId !== undefined && !validString(input.surfaceId))
-      || (input.groupId !== undefined && !validString(input.groupId))) return undefined
+      || (input.groupId !== undefined && !validString(input.groupId))) return { valid: false, reason: 'Panel placement input is invalid.' }
     const allocation = this.nextId('__panel-slot-preview__')
     const placement = this.makePlacement(input as unknown as AddPlacementInput, allocation.id)
-    if (placement === undefined || !this.canPlace(placement)) return undefined
-    return deepFreeze(clonePlacement(placement))
+    if (placement === undefined) return { valid: false, reason: 'Panel placement input is invalid.' }
+    const frozenPlacement = deepFreeze(clonePlacement(placement))
+    const reason = this.placementRejectionReason(placement)
+    return reason === undefined
+      ? deepFreeze({ placement: frozenPlacement, valid: true })
+      : deepFreeze({ placement: frozenPlacement, valid: false, reason })
   }
 
   public beginManualPlacement(input: unknown): boolean {
@@ -1441,6 +1499,7 @@ export class PlacementStore {
     const orientation = candidate.orientation ?? settings.orientation
     const clearanceM = candidate.clearanceM ?? settings.clearanceM
     const tiltDeg = candidate.tiltDeg ?? settings.tiltDeg
+    const azimuthDeg = candidate.azimuthDeg ?? settings.azimuthDeg
     if (!isOrientation(orientation) || !Number.isFinite(clearanceM) || clearanceM < 0 || !Number.isFinite(tiltDeg) || tiltDeg < 0 || tiltDeg > 90) return false
     return this.update((state) => ({
       ...state,
@@ -1451,6 +1510,7 @@ export class PlacementStore {
         orientation,
         clearanceM,
         tiltDeg,
+        ...(azimuthDeg === undefined ? {} : { azimuthDeg }),
         ...(candidate.groupId === undefined ? {} : { groupId: candidate.groupId }),
       },
     }), false)
@@ -1481,6 +1541,7 @@ export class PlacementStore {
       orientation: draft.orientation,
       clearanceM: draft.clearanceM,
       tiltDeg: draft.tiltDeg,
+      ...(draft.azimuthDeg === undefined ? {} : { azimuthDeg: draft.azimuthDeg }),
       groupId,
     }, allocation.id)
     if (placement === undefined || !this.canPlace(placement)) return undefined
@@ -1522,6 +1583,73 @@ export class PlacementStore {
   }
 
   public deletePanel(id: unknown): boolean { return this.deletePanels([id]) > 0 }
+
+  public deleteArray(arrayId: unknown): number {
+    if (!validString(arrayId)) return 0
+    const ids = Object.values(this.state.placements)
+      .filter((placement) => (placement.groupId ?? `single:${placement.id}`) === arrayId)
+      .map((placement) => placement.id)
+    return this.deletePanels(ids)
+  }
+
+  /** Replace the model used by every module in an array as one validated edit. */
+  public replaceArrayPanel(arrayId: unknown, panelId: unknown): boolean {
+    if (!validString(arrayId) || !validString(panelId) || !validPanel(this.definitions[panelId])) return false
+    return this.update((state) => {
+      const current = Object.values(state.placements)
+        .filter((placement) => (placement.groupId ?? `single:${placement.id}`) === arrayId)
+      if (current.length === 0 || current.every((placement) => placement.panelId === panelId)) return undefined
+      const ignored = new Set(current.map((placement) => placement.id))
+      const settings = this.settingsFor(current[0]?.groupId)
+      const candidates = current.map((placement): PanelPlacement => ({ ...placement, panelId }))
+      if (candidates.some((candidate) => !this.canPlace(candidate, ignored, settings))) return undefined
+      if (!pairwiseSpacingValid(
+        candidates,
+        this.definitions,
+        () => settings,
+        (surfaceId) => this.surface(surfaceId),
+        (surfaceId) => this.surfaceEdgeMetadata(surfaceId),
+      )) return undefined
+      const placements = { ...state.placements }
+      for (const candidate of candidates) placements[candidate.id] = candidate
+      return { ...state, placements, selectedIds: current.map((placement) => placement.id) }
+    })
+  }
+
+  /** Duplicate an array atomically; no partial copy is committed on failure. */
+  public duplicateArray(arrayId: unknown, delta: Point2 = { x: 0.5, y: 0.5 }): readonly PanelPlacement[] {
+    if (!validString(arrayId) || !isFinitePoint(delta)) return []
+    const source = Object.values(this.state.placements)
+      .filter((placement) => (placement.groupId ?? `single:${placement.id}`) === arrayId)
+    if (source.length === 0) return []
+    const groupId = allocateGeneratedGroupId(this.state.placements, this.state.groupSettings, this.state.nextId)
+    const ignored = new Set<string>()
+    const created: PanelPlacement[] = []
+    let nextId = this.state.nextId
+    for (const placement of source) {
+      const allocation = allocateGeneratedId(new Set([...Object.keys(this.state.placements), ...created.map((entry) => entry.id)]), nextId)
+      nextId = allocation.nextId
+      const candidate: PanelPlacement = {
+        ...placement,
+        id: allocation.id,
+        groupId,
+        localCenter: { x: placement.localCenter.x + delta.x, y: placement.localCenter.y + delta.y },
+      }
+      if (!this.canPlace(candidate, ignored, this.settingsFor(placement.groupId))) return []
+      created.push(candidate)
+    }
+    if (!pairwiseSpacingValid(created, this.definitions, () => this.settingsFor(source[0]?.groupId),
+      (surfaceId) => this.surface(surfaceId), (surfaceId) => this.surfaceEdgeMetadata(surfaceId))) return []
+    const settings = this.settingsFor(source[0]?.groupId)
+    const changed = this.update((state) => ({
+      ...state,
+      placements: { ...state.placements, ...Object.fromEntries(created.map((placement) => [placement.id, placement])) },
+      selectedIds: created.map((placement) => placement.id),
+      nextId,
+      groupSettings: { ...state.groupSettings, [groupId]: settings },
+    }))
+    return changed ? created.map(clonePlacement) : []
+  }
 
   public clickSelect(id: string, additive = false, toggle = false): readonly string[] {
     if (!validString(id) || this.state.placements[id] === undefined || !this.knownSurface(this.state.placements[id].surfaceId)) return this.state.selectedIds
@@ -1575,6 +1703,29 @@ export class PlacementStore {
 
   public moveSelected(delta: Point2): boolean { return this.moveGroup(delta) }
 
+  public previewMoveGroup(ids: readonly string[], delta: Point2): Readonly<{ readonly valid: boolean; readonly reason?: string }> {
+    if (!isStringList(ids) || !isFinitePoint(delta) || ids.length === 0) return { valid: false, reason: 'Select an array before moving it.' }
+    const selected = new Set(ids.filter((id) => this.state.placements[id] !== undefined))
+    if (selected.size === 0) return { valid: false, reason: 'The selected array no longer exists.' }
+    const candidates: PanelPlacement[] = []
+    for (const id of selected) {
+      const current = this.state.placements[id]
+      if (current === undefined) continue
+      const candidate = { ...current, localCenter: { x: current.localCenter.x + delta.x, y: current.localCenter.y + delta.y } }
+      const reason = this.placementRejectionReason(candidate, selected)
+      if (reason !== undefined) return { valid: false, reason }
+      candidates.push(candidate)
+    }
+    if (!pairwiseSpacingValid(
+      candidates,
+      this.definitions,
+      (groupId) => this.settingsFor(groupId),
+      (surfaceId) => this.surface(surfaceId),
+      (surfaceId) => this.surfaceEdgeMetadata(surfaceId),
+    )) return { valid: false, reason: 'Modules in the moved array would overlap or violate module spacing.' }
+    return { valid: true }
+  }
+
   public moveGroup(delta: Point2, ids?: readonly string[]): boolean
   public moveGroup(ids: readonly string[], delta: Point2): boolean
   public moveGroup(first: Point2 | readonly string[], second?: Point2 | readonly string[]): boolean {
@@ -1588,6 +1739,7 @@ export class PlacementStore {
       delta = first
     }
     if (delta === undefined || !isFinitePoint(delta) || ids.length === 0) return false
+    if (!this.previewMoveGroup(ids, delta).valid) return false
     const selected = new Set(ids.filter((id) => this.state.placements[id] !== undefined))
     if (selected.size === 0) return false
     return this.update((state) => {
@@ -1612,7 +1764,7 @@ export class PlacementStore {
     })
   }
 
-  /** Rotate one complete panel group through 90 degrees around its centre. */
+  /** Rotate one complete panel array through 90 degrees around its centre. */
   public rotateGroup(clockwise = true, ids: readonly string[] = this.state.selectedIds): boolean {
     if (typeof clockwise !== 'boolean' || !isStringList(ids) || ids.length === 0) return false
     const selected = new Set(ids.filter((id) => this.state.placements[id] !== undefined))
@@ -1629,24 +1781,24 @@ export class PlacementStore {
       y: sum.y + placement.localCenter.y / placements.length,
     }), { x: 0, y: 0 })
     const currentSettings = this.settingsFor(groupId)
-    const rotatedSettings: PanelGroupSettings = {
-      ...currentSettings,
-      orientation: currentSettings.orientation === 'portrait' ? 'landscape' : 'portrait',
-      interPanelSpacingM: currentSettings.rowSpacingM,
-      rowSpacingM: currentSettings.interPanelSpacingM,
-    }
+    const deltaDegrees = clockwise ? 90 : -90
+    const currentAzimuth = currentSettings.azimuthDeg ?? placements[0]?.azimuthDeg ?? 0
+    const rotatedAzimuth = ((currentAzimuth + deltaDegrees) % 360 + 360) % 360
+    const rotatedSettings: PanelGroupSettings = { ...currentSettings, azimuthDeg: rotatedAzimuth }
     return this.update((state) => {
       const changed: Record<string, PanelPlacement> = { ...state.placements }
       const candidates: PanelPlacement[] = []
       for (const current of placements) {
         const offsetX = current.localCenter.x - centre.x
         const offsetY = current.localCenter.y - centre.y
+        const radians = deltaDegrees * Math.PI / 180
         const candidate: PanelPlacement = {
           ...current,
-          localCenter: clockwise
-            ? { x: centre.x + offsetY, y: centre.y - offsetX }
-            : { x: centre.x - offsetY, y: centre.y + offsetX },
-          orientation: current.orientation === 'portrait' ? 'landscape' : 'portrait',
+          localCenter: {
+            x: centre.x + offsetX * Math.cos(radians) - offsetY * Math.sin(radians),
+            y: centre.y + offsetX * Math.sin(radians) + offsetY * Math.cos(radians),
+          },
+          azimuthDeg: rotatedAzimuth,
         }
         if (!this.canPlace(candidate, selected, rotatedSettings)) return undefined
         changed[current.id] = candidate
@@ -1739,31 +1891,82 @@ export class PlacementStore {
       const panel = this.definitions[first.panelId]
       if (!validPanel(panel)) return undefined
 
-      const footprint = orientedFootprint(panel, first.orientation)
-      const oldStepX = footprint.widthM + currentSettings.interPanelSpacingM
-      const oldStepY = footprint.heightM + currentSettings.rowSpacingM
-      const newStepX = footprint.widthM + settings.interPanelSpacingM
-      const newStepY = footprint.heightM + settings.rowSpacingM
+      const oldFootprint = orientedFootprint(panel, first.orientation)
+      const newFootprint = orientedFootprint(panel, settings.orientation)
+      const oldStepX = oldFootprint.widthM + currentSettings.interPanelSpacingM
+      const oldStepY = oldFootprint.heightM + currentSettings.rowSpacingM
+      const newStepX = newFootprint.widthM + settings.interPanelSpacingM
+      const newStepY = newFootprint.heightM + settings.rowSpacingM
       if (oldStepX <= 0 || oldStepY <= 0 || newStepX <= 0 || newStepY <= 0) return undefined
       const centre = currentGroup.reduce((sum, placement) => ({
         x: sum.x + placement.localCenter.x / currentGroup.length,
         y: sum.y + placement.localCenter.y / currentGroup.length,
       }), { x: 0, y: 0 })
-      const spacingChanged = settings.interPanelSpacingM !== currentSettings.interPanelSpacingM
+      const surface = this.surface(first.surfaceId)
+      if (surface === undefined) return undefined
+      const baseAxes = deriveSurfaceEdgeAxes(this.surfaceEdgeMetadata(first.surfaceId), surface.region)
+      const oldAxes = rotateSurfaceEdgeAxes(baseAxes, currentSettings.azimuthDeg ?? first.azimuthDeg ?? 0)
+      const newAxes = rotateSurfaceEdgeAxes(baseAxes, settings.azimuthDeg ?? 0)
+      const layoutChanged = settings.interPanelSpacingM !== currentSettings.interPanelSpacingM
         || settings.rowSpacingM !== currentSettings.rowSpacingM
+        || settings.orientation !== currentSettings.orientation
+        || (settings.azimuthDeg ?? 0) !== (currentSettings.azimuthDeg ?? 0)
       const ignored = new Set(currentGroup.map((placement) => placement.id))
-      const candidates = currentGroup.map((placement): PanelPlacement => ({
-        ...placement,
-        localCenter: spacingChanged
-          ? {
-              x: centre.x + (placement.localCenter.x - centre.x) * newStepX / oldStepX,
-              y: centre.y + (placement.localCenter.y - centre.y) * newStepY / oldStepY,
+      let nextId = state.nextId
+      const requestedRows = settings.modulesPerColumn
+      const requestedColumns = settings.modulesPerRow
+      const dimensionsChanged = requestedRows !== undefined && requestedColumns !== undefined
+        && (requestedRows !== currentSettings.modulesPerColumn || requestedColumns !== currentSettings.modulesPerRow)
+      const candidates: PanelPlacement[] = []
+      if (dimensionsChanged) {
+        const knownIds = new Set(Object.keys(state.placements))
+        for (let row = 0; row < requestedRows; row += 1) {
+          for (let column = 0; column < requestedColumns; column += 1) {
+            const candidateIndex = row * requestedColumns + column
+            const current = currentGroup[candidateIndex]
+            let id = current?.id
+            if (id === undefined) {
+              const allocation = allocateGeneratedId(knownIds, nextId)
+              id = allocation.id
+              nextId = allocation.nextId
+              knownIds.add(id)
             }
-          : placement.localCenter,
-        orientation: settings.orientation,
-        clearanceM: settings.clearanceM,
-        tiltDeg: settings.tiltDeg,
-      }))
+            const stagger = row % 2 === 1 ? settings.rowOffsetM ?? 0 : 0
+            const along = (column - (requestedColumns - 1) / 2) * newStepX + stagger
+            const across = (row - (requestedRows - 1) / 2) * newStepY
+            candidates.push({
+              ...first,
+              id,
+              localCenter: {
+                x: centre.x + newAxes.rowAxis.x * along + newAxes.crossAxis.x * across,
+                y: centre.y + newAxes.rowAxis.y * along + newAxes.crossAxis.y * across,
+              },
+              orientation: settings.orientation,
+              clearanceM: settings.clearanceM,
+              tiltDeg: settings.tiltDeg,
+              ...(settings.azimuthDeg === undefined ? { azimuthDeg: undefined } : { azimuthDeg: settings.azimuthDeg }),
+            })
+          }
+        }
+      } else {
+        candidates.push(...currentGroup.map((placement): PanelPlacement => ({
+          ...placement,
+          localCenter: layoutChanged
+            ? {
+                x: centre.x
+                  + newAxes.rowAxis.x * ((placement.localCenter.x - centre.x) * oldAxes.rowAxis.x + (placement.localCenter.y - centre.y) * oldAxes.rowAxis.y) * newStepX / oldStepX
+                  + newAxes.crossAxis.x * ((placement.localCenter.x - centre.x) * oldAxes.crossAxis.x + (placement.localCenter.y - centre.y) * oldAxes.crossAxis.y) * newStepY / oldStepY,
+                y: centre.y
+                  + newAxes.rowAxis.y * ((placement.localCenter.x - centre.x) * oldAxes.rowAxis.x + (placement.localCenter.y - centre.y) * oldAxes.rowAxis.y) * newStepX / oldStepX
+                  + newAxes.crossAxis.y * ((placement.localCenter.x - centre.x) * oldAxes.crossAxis.x + (placement.localCenter.y - centre.y) * oldAxes.crossAxis.y) * newStepY / oldStepY,
+              }
+            : placement.localCenter,
+          orientation: settings.orientation,
+          clearanceM: settings.clearanceM,
+          tiltDeg: settings.tiltDeg,
+          ...(settings.azimuthDeg === undefined ? { azimuthDeg: undefined } : { azimuthDeg: settings.azimuthDeg }),
+        })))
+      }
       if (candidates.some((candidate) => !this.canPlace(candidate, ignored, settings))) return undefined
       if (!pairwiseSpacingValid(
         candidates,
@@ -1772,9 +1975,15 @@ export class PlacementStore {
         (surfaceId) => this.surface(surfaceId),
         (surfaceId) => this.surfaceEdgeMetadata(surfaceId),
       )) return undefined
-      const placements = { ...state.placements }
+      const placements = Object.fromEntries(Object.entries(state.placements).filter(([, placement]) => placement.groupId !== groupId))
       for (const candidate of candidates) placements[candidate.id] = candidate
-      return { ...state, placements, groupSettings: { ...state.groupSettings, [groupId]: settings } }
+      return {
+        ...state,
+        placements,
+        selectedIds: candidates.map((candidate) => candidate.id),
+        nextId,
+        groupSettings: { ...state.groupSettings, [groupId]: settings },
+      }
     })
   }
 

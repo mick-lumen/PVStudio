@@ -160,12 +160,22 @@ export function computePanelPose(
   const clearanceM = finite(placement.clearanceM) && placement.clearanceM >= 0 ? placement.clearanceM : 0
   const tiltDeg = finite(placement.tiltDeg) ? Math.min(90, Math.max(0, placement.tiltDeg)) : 0
   const tiltRadians = tiltDeg * Math.PI / 180
+  const azimuthDeg = placement.azimuthDeg !== undefined && finite(placement.azimuthDeg) ? placement.azimuthDeg : 0
+  const azimuthRadians = azimuthDeg * Math.PI / 180
+  const rotatedTangentX = normalise(
+    add(scale(axes.tangentX, Math.cos(azimuthRadians)), scale(axes.tangentY, Math.sin(azimuthRadians))),
+    axes.tangentX,
+  )
+  const rotatedTangentY = normalise(
+    add(scale(axes.tangentY, Math.cos(azimuthRadians)), scale(axes.tangentX, -Math.sin(azimuthRadians))),
+    axes.tangentY,
+  )
   const tiltedNormal = normalise(
-    add(scale(axes.normal, Math.cos(tiltRadians)), scale(axes.tangentY, Math.sin(tiltRadians))),
+    add(scale(axes.normal, Math.cos(tiltRadians)), scale(rotatedTangentY, Math.sin(tiltRadians))),
     axes.normal,
   )
-  const rawTiltedTangentY = normalise(cross(tiltedNormal, axes.tangentX), axes.tangentY)
-  const tiltedTangentY = dot(rawTiltedTangentY, axes.tangentY) >= 0
+  const rawTiltedTangentY = normalise(cross(tiltedNormal, rotatedTangentX), rotatedTangentY)
+  const tiltedTangentY = dot(rawTiltedTangentY, rotatedTangentY) >= 0
     ? rawTiltedTangentY
     : scale(rawTiltedTangentY, -1)
   const anchorTuple = add(
@@ -175,7 +185,7 @@ export function computePanelPose(
   const centerTuple = add(anchorTuple, scale(tiltedNormal, Math.max(0, panel.thicknessM) / 2))
   const center: Point3 = { x: centerTuple[0], y: centerTuple[1], z: centerTuple[2] }
   const surfaceAnchor: Point3 = { x: anchorTuple[0], y: anchorTuple[1], z: anchorTuple[2] }
-  const tangentX = axes.tangentX
+  const tangentX = rotatedTangentX
   const normal = tiltedNormal
   const tangentY = tiltedTangentY
   const matrix: Matrix4Tuple = [

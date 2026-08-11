@@ -1,4 +1,12 @@
 export {
+  ArrayCanvasHandles,
+  type ArrayCanvasHandlesProps,
+} from './ArrayCanvasHandles'
+export {
+  selectedArrayHandleAnchor,
+  type ArrayHandleAnchor,
+} from './arrayHandleMath'
+export {
   PanelBatch,
   NO_PANEL_RAYCAST,
   PANEL_CELL_INTERACTION_PROPS,

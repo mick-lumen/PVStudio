@@ -262,8 +262,8 @@ test.describe('PV Studio production-browser workflow', () => {
 
     await page.getByLabel('Panel orientation').selectOption('landscape')
     await page.getByLabel('Edge setback in metres').fill('0.35')
-    await page.getByLabel('Panel spacing in metres').fill('0.04')
-    await page.getByLabel('Row spacing in metres').fill('0.08')
+    await page.getByLabel('Horizontal module spacing in metres').fill('0.04')
+    await page.getByLabel('Vertical module spacing in metres').fill('0.08')
     await page.getByLabel('Panel clearance in metres').fill('0.12')
     await page.getByLabel('Panel tilt in degrees').fill('12')
     await expect(page.getByLabel('Panel orientation')).toHaveValue('landscape')

@@ -66,6 +66,7 @@ export interface BuildPanelRenderItemsOptions {
   readonly panelVisuals?: PanelVisualCollection
   readonly selectedIds?: readonly string[]
   readonly draggingIds?: readonly string[]
+  readonly invalidDraggingIds?: readonly string[]
   readonly ghostPlacements?: readonly PanelPlacement[]
   readonly autoFillPreview?: AutoFillPreview
   readonly interactivePreview?: boolean
@@ -212,12 +213,13 @@ export function buildPanelRenderItems(options: BuildPanelRenderItemsOptions): re
   const surfaceEdges = options.surfaceEdges === undefined ? {} : surfaceEdgeMap(options.surfaceEdges)
   const selected = ids(options.selectedIds)
   const dragging = ids(options.draggingIds)
+  const invalidDragging = ids(options.invalidDraggingIds)
   const result: PanelRenderItem[] = []
   const seen = new Set<string>()
   for (const placement of options.placements ?? []) {
     if (!validPlacement(placement)) continue
     if (seen.has(placement.id)) continue
-    const state: PanelVisualState = dragging.has(placement.id) ? 'ghost' : selected.has(placement.id) ? 'selected' : 'placed'
+    const state: PanelVisualState = invalidDragging.has(placement.id) ? 'invalid' : dragging.has(placement.id) ? 'ghost' : selected.has(placement.id) ? 'selected' : 'placed'
     const surface = surfaces[placement.surfaceId]
     appendItem(result, placement, panels[placement.panelId], surface, options.panelVisuals, surface === undefined ? undefined : surfaceEdges[surface.id], state, 'placement', true)
     if (result[result.length - 1]?.id === placement.id) seen.add(placement.id)

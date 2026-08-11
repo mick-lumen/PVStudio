@@ -6,14 +6,119 @@
   touch-action: none !important;
 }
 
+.pv-viewer__surface-tools {
+  align-items: center;
+  background: rgba(24, 33, 34, 0.94);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.32);
+  display: flex;
+  gap: 6px;
+  left: 50%;
+  padding: 6px;
+  pointer-events: auto;
+  position: absolute;
+  top: 54px;
+  transform: translateX(-50%);
+  z-index: 8;
+}
+
+.pv-viewer__surface-tools button {
+  background: transparent;
+  border: 0;
+  border-radius: 7px;
+  color: #fff;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  min-height: 34px;
+  padding: 6px 10px;
+}
+
+.pv-viewer__surface-tools button:hover:not(:disabled),
+.pv-viewer__surface-tools button:focus-visible {
+  background: #ffd43b;
+  color: #1c2526;
+  outline: none;
+}
+
+.pv-viewer__surface-tools button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.pv-viewer__surface-edit-status {
+  background: rgba(24, 33, 34, 0.94);
+  border-radius: 8px;
+  bottom: 52px;
+  color: #fff;
+  font-size: 12px;
+  left: 50%;
+  max-width: min(420px, calc(100% - 24px));
+  padding: 8px 12px;
+  pointer-events: none;
+  position: absolute;
+  text-align: center;
+  transform: translateX(-50%);
+  z-index: 8;
+}
+
 .viewer-control-button {
   min-width: 44px;
   min-height: 32px;
 }
 
+.array-canvas-handles {
+  align-items: center;
+  background: rgba(24, 33, 34, 0.94);
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  border-radius: 999px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.32);
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  pointer-events: auto;
+  white-space: nowrap;
+}
+
+.array-canvas-handle {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-radius: 999px;
+  color: #fff;
+  cursor: pointer;
+  display: inline-flex;
+  font: inherit;
+  font-weight: 700;
+  gap: 5px;
+  min-height: 34px;
+  padding: 6px 10px;
+}
+
+.array-canvas-handle:hover,
+.array-canvas-handle:focus-visible {
+  background: #ffd43b;
+  color: #1c2526;
+  outline: none;
+}
+
+.array-canvas-handle span {
+  font-size: 12px;
+}
+
 @media (max-width: 600px) {
   .viewer-control-button {
     min-height: 44px;
+  }
+
+  .pv-viewer__surface-tools {
+    top: 52px;
+  }
+
+  .pv-viewer__surface-tools button {
+    min-height: 42px;
   }
 }
 

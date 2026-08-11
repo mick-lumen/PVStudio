@@ -120,8 +120,8 @@ describe('panel batch lifecycle helpers', () => {
     const boxesPerPanel = 9 + (first[0]?.cellRows ?? 0) - 1 + (first[0]?.cellColumns ?? 0) - 1
     const triangles = first.length * boxesPerPanel * 12
 
-    expect(stateItems.map((state) => state.length)).toEqual([500, 0, 0])
-    expect(PANEL_VISUAL_STATE_ORDER).toEqual(['placed', 'selected', 'ghost'])
+    expect(stateItems.map((state) => state.length)).toEqual([500, 0, 0, 0])
+    expect(PANEL_VISUAL_STATE_ORDER).toEqual(['placed', 'selected', 'ghost', 'invalid'])
     expect(drawCalls).toBe(11)
     expect(triangles).toBe(150_000)
     expect(first[0]?.id).toBe('panel-0')

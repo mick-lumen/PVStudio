@@ -31,12 +31,19 @@ export function createAdjacentPanelSlots(
 
   const occupied = new Set(placements.map((placement) => pointKey(placement.localCenter)))
   const candidates = new Map<string, AddPlacementInput>()
-  const offsets: readonly Point2[] = [
+  const canonicalOffsets: readonly Point2[] = [
     { x: -stepX, y: 0 },
     { x: stepX, y: 0 },
     { x: 0, y: -stepY },
     { x: 0, y: stepY },
   ]
+  const radians = (anchor.azimuthDeg ?? settings.azimuthDeg ?? 0) * Math.PI / 180
+  const cosine = Math.cos(radians)
+  const sine = Math.sin(radians)
+  const offsets = canonicalOffsets.map((offset): Point2 => ({
+    x: offset.x * cosine - offset.y * sine,
+    y: offset.x * sine + offset.y * cosine,
+  }))
   for (const placement of placements) {
     for (const offset of offsets) {
       const localCenter = { x: placement.localCenter.x + offset.x, y: placement.localCenter.y + offset.y }
@@ -49,6 +56,7 @@ export function createAdjacentPanelSlots(
         orientation: placement.orientation,
         clearanceM: placement.clearanceM,
         tiltDeg: placement.tiltDeg,
+        ...(placement.azimuthDeg === undefined ? {} : { azimuthDeg: placement.azimuthDeg }),
         ...(placement.groupId === undefined ? {} : { groupId: placement.groupId }),
       })
     }

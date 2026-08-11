@@ -83,6 +83,8 @@ export interface Rect {
 /** A simple, closed polygon in local metres. The first point is not repeated. */
 export interface Polygon {
   readonly points: readonly Point2[]
+  /** Interior rings which remain excluded from placement. */
+  readonly holes?: readonly (readonly Point2[])[]
 }
 
 /** A surface footprint accepted by the placement engine. */
@@ -146,8 +148,16 @@ export interface PanelGroupSettings {
   readonly setbackM: number
   readonly clearanceM: number
   readonly tiltDeg: number
+  /** Clockwise rotation of the complete array in the logical surface frame. */
+  readonly azimuthDeg?: number
   /** Optional maximum module count emitted on each auto-fill row. */
   readonly modulesPerRow?: number
+  /** Optional maximum number of module rows in the array. */
+  readonly modulesPerColumn?: number
+  /** Separation between repeated horizontal panel groups. */
+  readonly horizontalGroupSpacingM?: number
+  /** Separation between repeated vertical panel groups. */
+  readonly verticalGroupSpacingM?: number
   /** Optional alternating-row offset measured along the generated row axis. */
   readonly rowOffsetM?: number
   /** Optional extra clearance applied around exclusion obstacles only. */
@@ -173,7 +183,22 @@ export interface PanelPlacement {
   readonly orientation: Orientation
   readonly clearanceM: number
   readonly tiltDeg: number
+  /** Clockwise rotation in the logical surface frame; legacy records default to zero. */
+  readonly azimuthDeg?: number
   readonly groupId?: string
+}
+
+/**
+ * A stable, explicit solar array assembled from one or more panel placements.
+ * Placements retain their own centres for efficient editing; the array owns
+ * every setting which must change atomically.
+ */
+export interface PanelArray {
+  readonly id: string
+  readonly surfaceId: string
+  readonly panelId: string
+  readonly placementIds: readonly string[]
+  readonly settings: PanelGroupSettings
 }
 
 /** A module footprint after applying portrait or landscape orientation. */

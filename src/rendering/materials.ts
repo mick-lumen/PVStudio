@@ -1,6 +1,6 @@
 import * as THREE from 'three'
 
-export type PanelVisualState = 'placed' | 'selected' | 'ghost'
+export type PanelVisualState = 'placed' | 'selected' | 'ghost' | 'invalid'
 
 /**
  * Panel-specific visual metadata kept outside the canonical core contract.
@@ -74,23 +74,24 @@ export function createPanelMaterialSet(
   visualProperties: PanelVisualProperties = DEFAULT_PANEL_VISUAL_PROPERTIES,
 ): PanelMaterialSet {
   const ghost = state === 'ghost'
+  const invalid = state === 'invalid'
   const selected = state === 'selected'
   const frame = opaqueMaterial(
-    ghost ? PANEL_MATERIAL_PALETTE.ghostFrame : selected ? visualProperties.outlineColor : visualProperties.frameColor,
+    invalid ? 0xff3b30 : ghost ? PANEL_MATERIAL_PALETTE.ghostFrame : selected ? visualProperties.outlineColor : visualProperties.frameColor,
     selected ? 0.3 : 0.72,
     selected ? 0.28 : 0.34,
   )
   const glass = opaqueMaterial(
-    ghost ? PANEL_MATERIAL_PALETTE.ghostGlass : visualProperties.glassColor,
+    invalid ? 0x7f1d1d : ghost ? PANEL_MATERIAL_PALETTE.ghostGlass : visualProperties.glassColor,
     selected ? 0.48 : 0.36,
     selected ? 0.2 : 0.24,
   )
   const cell = opaqueMaterial(
-    ghost ? PANEL_MATERIAL_PALETTE.ghostCell : visualProperties.cellColor,
+    invalid ? 0xef4444 : ghost ? PANEL_MATERIAL_PALETTE.ghostCell : visualProperties.cellColor,
     0.1,
     0.38,
   )
-  if (ghost) {
+  if (ghost || invalid) {
     frame.transparent = true
     frame.opacity = 0.48
     frame.depthWrite = false
@@ -100,6 +101,13 @@ export function createPanelMaterialSet(
     cell.transparent = true
     cell.opacity = 0.38
     cell.depthWrite = false
+  }
+  if (invalid) {
+    frame.opacity = 0.92
+    glass.opacity = 0.52
+    cell.opacity = 0.68
+    glass.emissive.setHex(0x991b1b)
+    glass.emissiveIntensity = 0.75
   }
   if (selected) {
     glass.emissive.setHex(0x073a69)

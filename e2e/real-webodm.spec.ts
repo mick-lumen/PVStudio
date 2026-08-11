@@ -115,7 +115,7 @@ test.describe('real WebODM acceptance', () => {
       timeout: REAL_MODEL_TIMEOUT,
     })
     await waitForSurface(page)
-    await expect(page.getByTestId('pv-viewer').getByText('857 design surfaces')).toBeVisible()
+    await expect(page.getByTestId('pv-viewer').getByText(/\d+ design surfaces/u)).toBeVisible()
 
     await selectFirstVisibleRealSurface(page)
     await placePanelOnFirstUsableRealSurface(page)
@@ -187,7 +187,7 @@ test.describe('real WebODM acceptance', () => {
     })
     await waitForSurface(page)
 
-    await expect(page.getByTestId('pv-viewer').getByText('857 design surfaces')).toBeVisible()
+    await expect(page.getByTestId('pv-viewer').getByText(/\d+ design surfaces/u)).toBeVisible()
     expect(pageErrors).toEqual([])
   })
 

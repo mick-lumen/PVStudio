@@ -10,6 +10,8 @@ function fakeIndex(): ViewerSurfaceIndex {
     groupsFor: () => [],
     surfaceDescriptors: () => [],
     surfaceDescriptorsAsync: () => Promise.resolve([]),
+    mergeSurfaceIds: () => false,
+    splitSurfaceId: () => false,
     prepareRaycastGridsAsync: () => Promise.resolve(),
     selectionForIntersection: () => null,
     raycastRawRay: () => null,

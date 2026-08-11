@@ -4,6 +4,7 @@ import {
   Box,
   Check,
   CircleHelp,
+  Copy,
   FileUp,
   Grid2X2,
   Keyboard,
@@ -23,6 +24,7 @@ import {
   Sparkles,
   Square,
   Sun,
+  Trash2,
   Upload,
   X,
 } from 'lucide-react'
@@ -79,12 +81,21 @@ export type ShellPanel = Pick<PanelDefinition, 'id' | 'manufacturer' | 'model' |
   readonly efficiencyPct?: number
 }
 
+export interface ShellArray {
+  readonly id: string
+  readonly panelId: string
+  readonly panelCount: number
+}
+
 export interface PanelPlacementSummary {
   readonly count: number
   readonly selectedCount: number
   readonly previewCount: number
   readonly draggingCount: number
   readonly totalWattageW?: number
+  readonly arrayCount?: number
+  readonly selectedArrayPanelCount?: number
+  readonly individualSelectedCount?: number
 }
 
 export interface AlignPreviewState {
@@ -129,6 +140,13 @@ export interface ShellProps {
   readonly selectedSurfaceEdge?: ShellSurfaceEdge | null
   readonly onSurfaceEdgeChange?: (edge: SurfaceEdgeMetadata | undefined) => void
   readonly selectedPanel?: ShellPanel | null
+  readonly panelOptions?: readonly ShellPanel[]
+  readonly arrays?: readonly ShellArray[]
+  readonly selectedArrayId?: string
+  readonly onArraySelect?: (arrayId: string) => void
+  readonly onArrayPanelChange?: (panelId: string) => void
+  /** Re-arm the currently selected catalogue panel from the array inspector. */
+  readonly onAddSelectedPanel?: () => void
   readonly placements?: readonly PanelPlacement[]
   readonly selectedPlacementIds?: readonly string[]
   readonly placementSummary?: PanelPlacementSummary
@@ -148,6 +166,8 @@ export interface ShellProps {
   readonly onDelete?: (ids: readonly string[]) => void
   readonly onMoveSelection?: () => void
   readonly onRotateSelection?: () => void
+  readonly onDuplicateSelection?: () => void
+  readonly onDeleteArray?: () => void
   /** Optional host actions for the shell's utility controls. */
   readonly onFitView?: () => void
   readonly onHelp?: () => void
@@ -490,17 +510,18 @@ function PanelSummary({ panel }: { readonly panel: ShellPanel }): ReactNode {
 }
 
 function SettingsSummary({ settings, scopeLabel, onChange }: { readonly settings: PanelGroupSettings; readonly scopeLabel?: string; readonly onChange?: (patch: Partial<PanelGroupSettings>) => void }): ReactNode {
+  const [advanced, setAdvanced] = useState(false)
   const disabled = onChange === undefined
   const change = (patch: Partial<PanelGroupSettings>): void => { onChange?.(patch) }
-  const changeNumber = (key: 'setbackM' | 'interPanelSpacingM' | 'rowSpacingM' | 'clearanceM' | 'tiltDeg', rawValue: string): void => {
+  const changeNumber = (key: 'setbackM' | 'interPanelSpacingM' | 'rowSpacingM' | 'clearanceM' | 'tiltDeg' | 'azimuthDeg' | 'horizontalGroupSpacingM' | 'verticalGroupSpacingM', rawValue: string): void => {
     const value = parseFiniteInput(rawValue)
     if (value === undefined) return
-    if (key !== 'tiltDeg' && value < 0) return
+    if (key !== 'tiltDeg' && key !== 'azimuthDeg' && value < 0) return
     if (key === 'tiltDeg' && (value < 0 || value > 90)) return
     change({ [key]: value })
   }
   const changeOptionalNumber = (
-    key: 'modulesPerRow' | 'rowOffsetM' | 'obstacleClearanceM',
+    key: 'modulesPerRow' | 'modulesPerColumn' | 'rowOffsetM' | 'obstacleClearanceM',
     rawValue: string,
   ): void => {
     if (rawValue.trim().length === 0) {
@@ -509,7 +530,7 @@ function SettingsSummary({ settings, scopeLabel, onChange }: { readonly settings
     }
     const value = parseFiniteInput(rawValue)
     if (value === undefined) return
-    if (key === 'modulesPerRow' && (!Number.isInteger(value) || value < 1)) return
+    if ((key === 'modulesPerRow' || key === 'modulesPerColumn') && (!Number.isInteger(value) || value < 1)) return
     if ((key === 'rowOffsetM' || key === 'obstacleClearanceM') && value < 0) return
     change({ [key]: value })
   }
@@ -517,16 +538,24 @@ function SettingsSummary({ settings, scopeLabel, onChange }: { readonly settings
     <section className="inspector-card" aria-labelledby="layout-settings-title">
       <div className="inspector-card__title-row"><h3 id="layout-settings-title">Array settings</h3><Settings2 size={15} aria-hidden="true" /></div>
       <p className="inspector-note settings-scope" data-testid="settings-scope">Editing {scopeLabel ?? 'Global defaults'}</p>
-      <label className="setting-row"><span>Orientation</span><select value={settings.orientation} disabled={disabled} aria-label="Panel orientation" onChange={(event) => { change({ orientation: event.currentTarget.value as Orientation }); }}><option value="portrait">Portrait</option><option value="landscape">Landscape</option></select></label>
-      <label className="setting-row"><span>Edge setback</span><span className="input-with-unit"><input type="number" min={0} step={0.01} value={numericInputValue(settings.setbackM)} disabled={disabled} aria-label="Edge setback in metres" onChange={(event) => { changeNumber('setbackM', event.currentTarget.value) }} /><small>m</small></span></label>
-      <label className="setting-row"><span>Horizontal module spacing</span><span className="input-with-unit"><input type="number" min={0} step={0.01} value={numericInputValue(settings.interPanelSpacingM)} disabled={disabled} aria-label="Horizontal module spacing in metres" onChange={(event) => { changeNumber('interPanelSpacingM', event.currentTarget.value) }} /><small>m</small></span></label>
-      <label className="setting-row"><span>Vertical module spacing</span><span className="input-with-unit"><input type="number" min={0} step={0.01} value={numericInputValue(settings.rowSpacingM)} disabled={disabled} aria-label="Vertical module spacing in metres" onChange={(event) => { changeNumber('rowSpacingM', event.currentTarget.value) }} /><small>m</small></span></label>
-      <label className="setting-row"><span>Clearance</span><span className="input-with-unit"><input type="number" min={0} step={0.01} value={numericInputValue(settings.clearanceM)} disabled={disabled} aria-label="Panel clearance in metres" onChange={(event) => { changeNumber('clearanceM', event.currentTarget.value) }} /><small>m</small></span></label>
-      <label className="setting-row"><span>Tilt</span><span className="input-with-unit"><input type="number" min={0} max={90} step={1} value={numericInputValue(settings.tiltDeg)} disabled={disabled} aria-label="Panel tilt in degrees" onChange={(event) => { changeNumber('tiltDeg', event.currentTarget.value) }} /><small>°</small></span></label>
-      <div className="inspector-subheading">Auto-fill controls</div>
-      <label className="setting-row"><span>Modules per row</span><input data-testid="autofill-modules-per-row" type="number" min={1} step={1} placeholder="Auto" value={optionalNumericInputValue(settings.modulesPerRow)} disabled={disabled} aria-label="Modules per row" onChange={(event) => { changeOptionalNumber('modulesPerRow', event.currentTarget.value) }} /></label>
-      <label className="setting-row"><span>Row offset</span><span className="input-with-unit"><input data-testid="autofill-row-offset" type="number" min={0} step={0.01} placeholder="Auto" value={optionalNumericInputValue(settings.rowOffsetM)} disabled={disabled} aria-label="Row offset in metres" onChange={(event) => { changeOptionalNumber('rowOffsetM', event.currentTarget.value) }} /><small>m</small></span></label>
-      <label className="setting-row"><span>Obstacle clearance</span><span className="input-with-unit"><input data-testid="autofill-obstacle-clearance" type="number" min={0} step={0.01} placeholder="Auto" value={optionalNumericInputValue(settings.obstacleClearanceM)} disabled={disabled} aria-label="Obstacle clearance in metres" onChange={(event) => { changeOptionalNumber('obstacleClearanceM', event.currentTarget.value) }} /><small>m</small></span></label>
+      <div className="inspector-tabs" role="tablist" aria-label="Array setting level"><button className={`inspector-tab${advanced ? '' : ' inspector-tab--active'}`} type="button" role="tab" aria-selected={!advanced} onClick={() => { setAdvanced(false) }}>Basic</button><button className={`inspector-tab${advanced ? ' inspector-tab--active' : ''}`} type="button" role="tab" aria-selected={advanced} onClick={() => { setAdvanced(true) }}>Advanced</button></div>
+      <div className={`settings-section${advanced ? '' : ' settings-section--active'}`} aria-label="Basic array settings">
+        <label className="setting-row"><span>Orientation</span><select value={settings.orientation} disabled={disabled} aria-label="Panel orientation" onChange={(event) => { change({ orientation: event.currentTarget.value as Orientation }); }}><option value="portrait">Portrait</option><option value="landscape">Landscape</option></select></label>
+        <label className="setting-row"><span>Azimuth</span><span className="input-with-unit"><input type="number" step={1} value={numericInputValue(settings.azimuthDeg ?? 0)} disabled={disabled} aria-label="Array azimuth in degrees" onChange={(event) => { changeNumber('azimuthDeg', event.currentTarget.value) }} /><small>°</small></span></label>
+        <label className="setting-row"><span>Tilt</span><span className="input-with-unit"><input type="number" min={0} max={90} step={1} value={numericInputValue(settings.tiltDeg)} disabled={disabled} aria-label="Panel tilt in degrees" onChange={(event) => { changeNumber('tiltDeg', event.currentTarget.value) }} /><small>°</small></span></label>
+        <label className="setting-row"><span>Height / roof clearance</span><span className="input-with-unit"><input type="number" min={0} step={0.01} value={numericInputValue(settings.clearanceM)} disabled={disabled} aria-label="Panel clearance in metres" onChange={(event) => { changeNumber('clearanceM', event.currentTarget.value) }} /><small>m</small></span></label>
+      </div>
+      <div className={`settings-section${advanced ? ' settings-section--active' : ''}`} aria-label="Advanced array settings">
+        <label className="setting-row"><span>Horizontal module spacing</span><span className="input-with-unit"><input type="number" min={0} step={0.01} value={numericInputValue(settings.interPanelSpacingM)} disabled={disabled} aria-label="Horizontal module spacing in metres" onChange={(event) => { changeNumber('interPanelSpacingM', event.currentTarget.value) }} /><small>m</small></span></label>
+        <label className="setting-row"><span>Vertical module spacing</span><span className="input-with-unit"><input type="number" min={0} step={0.01} value={numericInputValue(settings.rowSpacingM)} disabled={disabled} aria-label="Vertical module spacing in metres" onChange={(event) => { changeNumber('rowSpacingM', event.currentTarget.value) }} /><small>m</small></span></label>
+        <label className="setting-row"><span>Modules per row</span><input data-testid="autofill-modules-per-row" type="number" min={1} step={1} placeholder="Auto" value={optionalNumericInputValue(settings.modulesPerRow)} disabled={disabled} aria-label="Modules per row" onChange={(event) => { changeOptionalNumber('modulesPerRow', event.currentTarget.value) }} /></label>
+        <label className="setting-row"><span>Modules per column</span><input type="number" min={1} step={1} placeholder="Auto" value={optionalNumericInputValue(settings.modulesPerColumn)} disabled={disabled} aria-label="Modules per column" onChange={(event) => { changeOptionalNumber('modulesPerColumn', event.currentTarget.value) }} /></label>
+        <label className="setting-row"><span>Horizontal group spacing</span><span className="input-with-unit"><input type="number" min={0} step={0.01} value={numericInputValue(settings.horizontalGroupSpacingM ?? 0)} disabled={disabled} aria-label="Horizontal group spacing in metres" onChange={(event) => { changeNumber('horizontalGroupSpacingM', event.currentTarget.value) }} /><small>m</small></span></label>
+        <label className="setting-row"><span>Vertical group spacing</span><span className="input-with-unit"><input type="number" min={0} step={0.01} value={numericInputValue(settings.verticalGroupSpacingM ?? 0)} disabled={disabled} aria-label="Vertical group spacing in metres" onChange={(event) => { changeNumber('verticalGroupSpacingM', event.currentTarget.value) }} /><small>m</small></span></label>
+        <label className="setting-row"><span>Edge setback</span><span className="input-with-unit"><input type="number" min={0} step={0.01} value={numericInputValue(settings.setbackM)} disabled={disabled} aria-label="Edge setback in metres" onChange={(event) => { changeNumber('setbackM', event.currentTarget.value) }} /><small>m</small></span></label>
+        <label className="setting-row"><span>Row offset</span><span className="input-with-unit"><input data-testid="autofill-row-offset" type="number" min={0} step={0.01} placeholder="Auto" value={optionalNumericInputValue(settings.rowOffsetM)} disabled={disabled} aria-label="Row offset in metres" onChange={(event) => { changeOptionalNumber('rowOffsetM', event.currentTarget.value) }} /><small>m</small></span></label>
+        <label className="setting-row"><span>Obstacle clearance</span><span className="input-with-unit"><input data-testid="autofill-obstacle-clearance" type="number" min={0} step={0.01} placeholder="Auto" value={optionalNumericInputValue(settings.obstacleClearanceM)} disabled={disabled} aria-label="Obstacle clearance in metres" onChange={(event) => { changeOptionalNumber('obstacleClearanceM', event.currentTarget.value) }} /><small>m</small></span></label>
+      </div>
       <p className="inspector-note"><SlidersHorizontal size={13} aria-hidden="true" /> Setback {formatMillimetres(settings.setbackM)} · row {formatMillimetres(settings.rowSpacingM)}</p>
     </section>
   )
@@ -537,8 +566,10 @@ function PlacementSummary({ summary }: { readonly summary: PanelPlacementSummary
     <section className="inspector-card inspector-card--status" aria-labelledby="placement-summary-title">
       <div className="inspector-card__title-row"><h3 id="placement-summary-title">Array status</h3><span className="status-dot" aria-hidden="true" /></div>
       <dl className="metric-grid metric-grid--two">
-        <div><dt>Panels</dt><dd>{String(summary.count)}</dd></div>
-        <div><dt>Selected</dt><dd>{String(summary.selectedCount)}</dd></div>
+        <div><dt>Project panels</dt><dd>{String(summary.count)}</dd></div>
+        <div><dt>Arrays</dt><dd>{String(summary.arrayCount ?? 0)}</dd></div>
+        <div><dt>Selected array</dt><dd>{String(summary.selectedArrayPanelCount ?? 0)}</dd></div>
+        <div><dt>Selected panels</dt><dd>{String(summary.individualSelectedCount ?? summary.selectedCount)}</dd></div>
         <div><dt>Preview</dt><dd>{String(summary.previewCount)}</dd></div>
         <div><dt>Dragging</dt><dd>{String(summary.draggingCount)}</dd></div>
       </dl>
@@ -547,7 +578,29 @@ function PlacementSummary({ summary }: { readonly summary: PanelPlacementSummary
   )
 }
 
-function ArrayActions({ selectedCount, onMove, onRotate }: { readonly selectedCount: number; readonly onMove?: () => void; readonly onRotate?: () => void }): ReactNode {
+function ArrayOverview({ arrays, selectedArrayId, onSelect }: { readonly arrays: readonly ShellArray[]; readonly selectedArrayId?: string; readonly onSelect?: (arrayId: string) => void }): ReactNode {
+  if (arrays.length === 0) return null
+  return (
+    <section className="inspector-card" aria-labelledby="array-overview-title">
+      <div className="inspector-card__title-row"><h3 id="array-overview-title">Panel arrays</h3><span className="surface-status"><span aria-hidden="true" />{String(arrays.length)}</span></div>
+      <div className="array-list">
+        {arrays.map((array, index) => <button className={`button button--quiet button--full${array.id === selectedArrayId ? ' is-selected' : ''}`} type="button" key={array.id} aria-pressed={array.id === selectedArrayId} onClick={() => { onSelect?.(array.id) }}><span>Array {String(index + 1)}</span><strong>{String(array.panelCount)} panels</strong></button>)}
+      </div>
+    </section>
+  )
+}
+
+function ArrayPanelModel({ panels, panelId, onChange }: { readonly panels: readonly ShellPanel[]; readonly panelId: string; readonly onChange?: (panelId: string) => void }): ReactNode {
+  return (
+    <section className="inspector-card" aria-labelledby="array-panel-model-title">
+      <div className="inspector-card__title-row"><h3 id="array-panel-model-title">Panel model</h3><PanelsTopLeft size={15} aria-hidden="true" /></div>
+      <label className="setting-row"><span>Model for this array</span><select value={panelId} disabled={onChange === undefined} aria-label="Panel model for selected array" onChange={(event) => { onChange?.(event.currentTarget.value) }}>{panels.map((panel) => <option key={panel.id} value={panel.id}>{panel.manufacturer} {panel.model} · {String(panel.wattageW)} W</option>)}</select></label>
+      <p className="inspector-note">Changing this updates every module in this array together.</p>
+    </section>
+  )
+}
+
+function ArrayActions({ selectedCount, onMove, onRotate, onDuplicate, onDelete }: { readonly selectedCount: number; readonly onMove?: () => void; readonly onRotate?: () => void; readonly onDuplicate?: () => void; readonly onDelete?: () => void }): ReactNode {
   if (selectedCount === 0) return null
   return (
     <section className="inspector-card" aria-labelledby="array-actions-title">
@@ -555,6 +608,8 @@ function ArrayActions({ selectedCount, onMove, onRotate }: { readonly selectedCo
       <div className="array-action-grid">
         <button className="button button--quiet" type="button" disabled={onMove === undefined} onClick={onMove}><Move3d size={15} aria-hidden="true" />Move array</button>
         <button className="button button--quiet" type="button" disabled={onRotate === undefined} onClick={onRotate}><RotateCw size={15} aria-hidden="true" />Rotate 90°</button>
+        <button className="button button--quiet" type="button" disabled={onDuplicate === undefined} onClick={onDuplicate}><Copy size={15} aria-hidden="true" />Duplicate</button>
+        <button className="button button--quiet button--danger" type="button" disabled={onDelete === undefined} onClick={onDelete}><Trash2 size={15} aria-hidden="true" />Delete array</button>
       </div>
       <p className="inspector-note">Drag any highlighted panel to move the complete array. White outlines add the next panel.</p>
     </section>
@@ -617,14 +672,16 @@ function ObstacleSummary({ obstacles, draftObstacle, onChange, onRemove, onClear
   )
 }
 
-function InspectorFallback({ selectedSurface, selectedSurfaceEdge, onSurfaceEdgeChange, selectedPanel, settings, settingsScopeLabel, onSettingsChange, selectedCount, onMoveSelection, onRotateSelection, placementSummary, onAutoFill, obstacles, draftObstacle, onObstacleChange, onObstacleRemove, onObstaclesClear }: { readonly selectedSurface?: ShellSurface | null; readonly selectedSurfaceEdge?: ShellSurfaceEdge | null; readonly onSurfaceEdgeChange?: (edge: SurfaceEdgeMetadata | undefined) => void; readonly selectedPanel?: ShellPanel | null; readonly settings?: PanelGroupSettings; readonly settingsScopeLabel?: string; readonly onSettingsChange?: (patch: Partial<PanelGroupSettings>) => void; readonly selectedCount: number; readonly onMoveSelection?: () => void; readonly onRotateSelection?: () => void; readonly placementSummary?: PanelPlacementSummary; readonly onAutoFill?: () => void; readonly obstacles?: readonly RectangularObstacle[]; readonly draftObstacle?: RectangularObstacle | null; readonly onObstacleChange?: (id: string, patch: ObstacleGeometryPatch) => void; readonly onObstacleRemove?: (id: string) => void; readonly onObstaclesClear?: () => void }): ReactNode {
+function InspectorFallback({ selectedSurface, selectedSurfaceEdge, onSurfaceEdgeChange, selectedPanel, panelOptions = [], arrays = [], selectedArrayId, onArraySelect, onArrayPanelChange, settings, settingsScopeLabel, onSettingsChange, selectedCount, onMoveSelection, onRotateSelection, onDuplicateSelection, onDeleteArray, placementSummary, onAutoFill, obstacles, draftObstacle, onObstacleChange, onObstacleRemove, onObstaclesClear }: { readonly selectedSurface?: ShellSurface | null; readonly selectedSurfaceEdge?: ShellSurfaceEdge | null; readonly onSurfaceEdgeChange?: (edge: SurfaceEdgeMetadata | undefined) => void; readonly selectedPanel?: ShellPanel | null; readonly panelOptions?: readonly ShellPanel[]; readonly arrays?: readonly ShellArray[]; readonly selectedArrayId?: string; readonly onArraySelect?: (arrayId: string) => void; readonly onArrayPanelChange?: (panelId: string) => void; readonly settings?: PanelGroupSettings; readonly settingsScopeLabel?: string; readonly onSettingsChange?: (patch: Partial<PanelGroupSettings>) => void; readonly selectedCount: number; readonly onMoveSelection?: () => void; readonly onRotateSelection?: () => void; readonly onDuplicateSelection?: () => void; readonly onDeleteArray?: () => void; readonly placementSummary?: PanelPlacementSummary; readonly onAutoFill?: () => void; readonly obstacles?: readonly RectangularObstacle[]; readonly draftObstacle?: RectangularObstacle | null; readonly onObstacleChange?: (id: string, patch: ObstacleGeometryPatch) => void; readonly onObstacleRemove?: (id: string) => void; readonly onObstaclesClear?: () => void }): ReactNode {
   if (selectedSurface === undefined && selectedPanel === undefined && settings === undefined && placementSummary === undefined && obstacles === undefined) return <EmptySlot label="Inspector" />
   return (
     <div className="inspector-content">
       <div className="inspector-heading"><div><p className="eyebrow">Inspector</p><h2>{selectedSurface?.label ?? 'Selection'}</h2></div><span className="surface-status"><span aria-hidden="true" />Active</span></div>
+      {selectedArrayId === undefined || selectedPanel === undefined || selectedPanel === null ? null : <ArrayPanelModel panels={panelOptions} panelId={selectedPanel.id} onChange={onArrayPanelChange} />}
+      <ArrayOverview arrays={arrays} selectedArrayId={selectedArrayId} onSelect={onArraySelect} />
       {selectedSurface === null ? <EmptySlot label="Surface" /> : selectedSurface === undefined ? null : <SurfaceSummary surface={selectedSurface} edge={selectedSurfaceEdge} onEdgeChange={onSurfaceEdgeChange} />}
       {selectedPanel === null ? null : selectedPanel === undefined ? null : <PanelSummary panel={selectedPanel} />}
-      <ArrayActions selectedCount={selectedCount} onMove={onMoveSelection} onRotate={onRotateSelection} />
+      <ArrayActions selectedCount={selectedCount} onMove={onMoveSelection} onRotate={onRotateSelection} onDuplicate={onDuplicateSelection} onDelete={onDeleteArray} />
       {settings === undefined ? null : <SettingsSummary settings={settings} scopeLabel={settingsScopeLabel} onChange={onSettingsChange} />}
       {placementSummary === undefined ? null : <PlacementSummary summary={placementSummary} />}
       {obstacles === undefined ? null : <ObstacleSummary obstacles={obstacles} draftObstacle={draftObstacle} onChange={onObstacleChange} onRemove={onObstacleRemove} onClear={onObstaclesClear} />}
@@ -735,6 +792,12 @@ export function Shell({
   selectedSurfaceEdge,
   onSurfaceEdgeChange,
   selectedPanel,
+  panelOptions,
+  arrays,
+  selectedArrayId,
+  onArraySelect,
+  onArrayPanelChange,
+  onAddSelectedPanel,
   placements,
   selectedPlacementIds = [],
   placementSummary,
@@ -751,6 +814,8 @@ export function Shell({
   onDelete,
   onMoveSelection,
   onRotateSelection,
+  onDuplicateSelection,
+  onDeleteArray,
   onFitView,
   onHelp,
   onLayersOpen,
@@ -850,6 +915,19 @@ export function Shell({
     previousRightPanelOpenRef.current = rightPanelOpen
     if (previous && !rightPanelOpen) reopenInspectorRef.current?.focus()
   }, [rightPanelOpen])
+
+  useEffect(() => {
+    // Placement keeps the catalogue visible so repeated clicks can add panels.
+    // Selecting or dragging an existing array opens its inspector automatically.
+    if (selectedPlacementIds.length === 0 || activeTool === 'place') return
+    let current = true
+    queueMicrotask(() => {
+      if (!current) return
+      setSelectedTab('inspector')
+      setRightPanelOpen(true)
+    })
+    return () => { current = false }
+  }, [activeTool, selectedPlacementIds])
 
   useEffect(() => {
     if (typeof document !== 'undefined') document.documentElement.dataset.theme = theme
@@ -1079,7 +1157,7 @@ export function Shell({
           <div className="tool-rail__section"><p className="tool-rail__label">Tools</p><nav className="tool-nav" aria-label="Placement tools">
             {TOOL_DEFINITIONS.map((tool, index) => { const Icon = tool.icon; const isActive = activeTool === tool.id; const unavailable = (tool.id === 'align' && onAlignStart === undefined) || (tool.id === 'autofill' && onAutoFill === undefined) || (tool.id === 'obstacle' && (onObstacleStart === undefined || selectedSurface === undefined || selectedSurface === null)); return <button ref={index === 0 ? mobileFirstToolRef : undefined} className={`tool-button${isActive ? ' tool-button--active' : ''}`} type="button" key={tool.id} aria-label={tool.label} aria-pressed={isActive} title={`${tool.label} (${tool.shortcut})`} disabled={unavailable} onClick={() => { activateTool(tool.id); }}><Icon size={18} strokeWidth={isActive ? 2.1 : 1.75} aria-hidden="true" /><span>{tool.label}</span><kbd>{tool.shortcut}</kbd></button> })}
           </nav></div>
-          <div className="tool-rail__bottom">{onLayersOpen === undefined ? null : <button className="tool-button tool-button--muted" type="button" title="Project layers" aria-label="Project layers" onClick={onLayersOpen}><Layers3 size={18} strokeWidth={1.75} aria-hidden="true" /><span>Layers</span></button>}<button className="tool-button tool-button--muted" type="button" title="Design settings" onClick={() => { setSelectedTab('inspector'); setRightPanelOpen(true); }}><SlidersHorizontal size={18} strokeWidth={1.75} aria-hidden="true" /><span>Settings</span></button></div>
+          <div className="tool-rail__bottom">{onLayersOpen === undefined ? null : <button className="tool-button tool-button--muted" type="button" title="Project layers" aria-label="Project layers" onClick={onLayersOpen}><Layers3 size={18} strokeWidth={1.75} aria-hidden="true" /><span>Layers</span></button>}<button className="tool-button tool-button--muted" type="button" title="Workspace preferences" onClick={() => { setSelectedTab('inspector'); setRightPanelOpen(true); }}><SlidersHorizontal size={18} strokeWidth={1.75} aria-hidden="true" /><span>Preferences</span></button></div>
         </aside>
 
         <main className="design-stage" aria-label="Design workspace">
@@ -1121,8 +1199,8 @@ export function Shell({
 
         {rightPanelOpen ? <button className="inspector-backdrop" type="button" aria-label="Dismiss side panel" onClick={closeRightPanel} /> : null}
         <aside id="workspace-side-panel" className={`inspector-panel${rightPanelOpen ? ' inspector-panel--open' : ''}`} aria-label="Panel library and inspector" aria-hidden={!rightPanelOpen} inert={!rightPanelOpen}>
-          <div className="inspector-tabs" role="tablist" aria-orientation="horizontal" aria-label="Workspace side panel"><button ref={panelTabRef} className={`inspector-tab${selectedTab === 'panel' ? ' inspector-tab--active' : ''}`} id="panel-tab" type="button" role="tab" aria-selected={selectedTab === 'panel'} aria-controls="panel-panel" tabIndex={selectedTab === 'panel' ? 0 : -1} onKeyDown={handleInspectorTabKeyDown} onClick={() => { setSelectedTab('panel'); }}><PanelsTopLeft size={15} aria-hidden="true" />Panel</button><button ref={inspectorTabRef} className={`inspector-tab${selectedTab === 'inspector' ? ' inspector-tab--active' : ''}`} id="inspector-tab" type="button" role="tab" aria-selected={selectedTab === 'inspector'} aria-controls="inspector-panel" tabIndex={selectedTab === 'inspector' ? 0 : -1} onKeyDown={handleInspectorTabKeyDown} onClick={() => { setSelectedTab('inspector'); }}><Settings2 size={15} aria-hidden="true" />Inspector</button><button className="inspector-close icon-button icon-button--small" type="button" aria-label="Close side panel" onClick={closeRightPanel}><X size={15} aria-hidden="true" /></button></div>
-          <div className="inspector-panel__body">{selectedTab === 'panel' ? <div id="panel-panel" role="tabpanel" aria-labelledby="panel-tab"><ShellErrorBoundary area="panel library" resetKey={panelSlot ?? `empty-library:${hasImportHandler ? 'ready' : 'disabled'}`}>{panelSlot ?? <EmptySlot label="Panel library" action={hasImportHandler ? 'Import site model' : undefined} onAction={hasImportHandler ? handleImportClick : undefined} />}</ShellErrorBoundary></div> : <div id="inspector-panel" role="tabpanel" aria-labelledby="inspector-tab"><ShellErrorBoundary area="inspector" resetKey={inspector ?? settingsScopeLabel ?? settings ?? selectedSurface ?? selectedSurfaceEdge ?? selectedPanel ?? summary ?? obstacles ?? 'fallback-inspector'}>{inspector ?? <InspectorFallback selectedSurface={selectedSurface} selectedSurfaceEdge={selectedSurfaceEdge} onSurfaceEdgeChange={onSurfaceEdgeChange} selectedPanel={selectedPanel} settings={settings} settingsScopeLabel={settingsScopeLabel} onSettingsChange={onSettingsChange} selectedCount={selectedPlacementIds.length} onMoveSelection={onMoveSelection === undefined ? undefined : moveSelection} onRotateSelection={onRotateSelection === undefined ? undefined : rotateSelection} placementSummary={summary} onAutoFill={onAutoFill} obstacles={obstacles} draftObstacle={draftObstacle} onObstacleChange={onObstacleChange} onObstacleRemove={onObstacleRemove} onObstaclesClear={onObstaclesClear} />}</ShellErrorBoundary>{panelStatus === undefined ? null : <div className="panel-status-slot"><ShellErrorBoundary area="panel status" resetKey={panelStatus}>{panelStatus}</ShellErrorBoundary></div>}{panelStatus === undefined && summary === undefined ? null : panelStatus === undefined ? <div className="panel-status-slot"><PlacementSummary summary={summary as PanelPlacementSummary} /></div> : null}</div>}</div>
+          <div className="inspector-tabs" role="tablist" aria-orientation="horizontal" aria-label="Workspace side panel"><button ref={panelTabRef} className={`inspector-tab${selectedTab === 'panel' ? ' inspector-tab--active' : ''}`} id="panel-tab" type="button" role="tab" aria-selected={selectedTab === 'panel'} aria-controls="panel-panel" tabIndex={selectedTab === 'panel' ? 0 : -1} onKeyDown={handleInspectorTabKeyDown} onClick={() => { setSelectedTab('panel'); }}><PanelsTopLeft size={15} aria-hidden="true" />Panel</button><button ref={inspectorTabRef} className={`inspector-tab${selectedTab === 'inspector' ? ' inspector-tab--active' : ''}`} id="inspector-tab" type="button" role="tab" aria-selected={selectedTab === 'inspector'} aria-controls="inspector-panel" tabIndex={selectedTab === 'inspector' ? 0 : -1} onKeyDown={handleInspectorTabKeyDown} onClick={() => { setSelectedTab('inspector'); }}><Settings2 size={15} aria-hidden="true" />Inspector</button>{selectedTab !== 'inspector' || onAddSelectedPanel === undefined ? null : <button className="inspector-add-panel" type="button" aria-label="+ Panel" onClick={onAddSelectedPanel}><Plus size={14} aria-hidden="true" />Panel</button>}<button className="inspector-close icon-button icon-button--small" type="button" aria-label="Close side panel" onClick={closeRightPanel}><X size={15} aria-hidden="true" /></button></div>
+          <div className="inspector-panel__body">{selectedTab === 'panel' ? <div id="panel-panel" role="tabpanel" aria-labelledby="panel-tab"><ShellErrorBoundary area="panel library" resetKey={panelSlot ?? `empty-library:${hasImportHandler ? 'ready' : 'disabled'}`}>{panelSlot ?? <EmptySlot label="Panel library" action={hasImportHandler ? 'Import site model' : undefined} onAction={hasImportHandler ? handleImportClick : undefined} />}</ShellErrorBoundary></div> : <div id="inspector-panel" role="tabpanel" aria-labelledby="inspector-tab"><ShellErrorBoundary area="inspector" resetKey={inspector ?? settingsScopeLabel ?? settings ?? selectedSurface ?? selectedSurfaceEdge ?? selectedPanel ?? summary ?? obstacles ?? 'fallback-inspector'}>{inspector ?? <InspectorFallback selectedSurface={selectedSurface} selectedSurfaceEdge={selectedSurfaceEdge} onSurfaceEdgeChange={onSurfaceEdgeChange} selectedPanel={selectedPanel} panelOptions={panelOptions} arrays={arrays} selectedArrayId={selectedArrayId} onArraySelect={onArraySelect} onArrayPanelChange={onArrayPanelChange} settings={settings} settingsScopeLabel={settingsScopeLabel} onSettingsChange={onSettingsChange} selectedCount={selectedPlacementIds.length} onMoveSelection={onMoveSelection === undefined ? undefined : moveSelection} onRotateSelection={onRotateSelection === undefined ? undefined : rotateSelection} onDuplicateSelection={onDuplicateSelection} onDeleteArray={onDeleteArray} placementSummary={summary} onAutoFill={onAutoFill} obstacles={obstacles} draftObstacle={draftObstacle} onObstacleChange={onObstacleChange} onObstacleRemove={onObstacleRemove} onObstaclesClear={onObstaclesClear} />}</ShellErrorBoundary>{panelStatus === undefined ? null : <div className="panel-status-slot"><ShellErrorBoundary area="panel status" resetKey={panelStatus}>{panelStatus}</ShellErrorBoundary></div>}{panelStatus === undefined && summary === undefined ? null : panelStatus === undefined ? <div className="panel-status-slot"><PlacementSummary summary={summary as PanelPlacementSummary} /></div> : null}</div>}</div>
         </aside>
         {!rightPanelOpen ? <button ref={reopenInspectorRef} className="reopen-inspector" type="button" aria-controls="workspace-side-panel" aria-expanded={rightPanelOpen} onClick={() => { setRightPanelOpen(true); }}><PanelTop size={15} aria-hidden="true" />Open panel</button> : null}
       </div>

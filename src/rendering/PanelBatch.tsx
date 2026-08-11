@@ -248,6 +248,7 @@ export const PanelBatch = forwardRef(function PanelBatch(
     onPanelDragStart,
     onPanelDrag,
     onPanelDragEnd,
+    onPanelContextMenu,
   } = props
   const materials = useMemo(
     () => PANEL_VISUAL_STATE_ORDER.map((state) => getSharedPanelMaterialSet(state, batch.visuals)),
@@ -325,12 +326,32 @@ export const PanelBatch = forwardRef(function PanelBatch(
     previousStateItems.current = stateItems
   }, [batch.cellColumns, batch.cellRows, batch.heightM, batch.thicknessM, batch.visuals.cellLineWidthM, batch.widthM, frameDepth, frameWidth, glassDepth, innerHeight, innerWidth, cellDepth, outlineDepth, outlineWidth, stateItems, glassRefs, frameTopRefs, frameBottomRefs, frameLeftRefs, frameRightRefs, outlineTopRefs, outlineBottomRefs, outlineLeftRefs, outlineRightRefs, horizontalCellRefs, verticalCellRefs])
 
-  const itemForEvent = useCallback((event: ThreeEvent<PointerEvent>, items: readonly PanelRenderItem[], barsPerPanel = 1): { readonly item: PanelRenderItem; readonly index: number } | undefined => {
+  const itemForEvent = useCallback((event: { readonly instanceId?: number }, items: readonly PanelRenderItem[], barsPerPanel = 1): { readonly item: PanelRenderItem; readonly index: number } | undefined => {
     const index = panelInstanceIndex(event.instanceId, barsPerPanel)
     if (index === undefined) return undefined
     const item = items[index]
     return item === undefined ? undefined : { item, index }
   }, [])
+
+  const handleContextMenu = useCallback((event: ThreeEvent<MouseEvent>, items: readonly PanelRenderItem[]) => {
+    if (!interactionsEnabled) return
+    const resolved = itemForEvent(event, items)
+    if (resolved === undefined || !resolved.item.interactive) return
+    event.stopPropagation()
+    event.nativeEvent.preventDefault()
+    const native = event.nativeEvent
+    onPanelContextMenu?.(resolved.item.placement, {
+      worldPoint: toPanelLocalPoint(event.point, groupRef.current),
+      shiftKey: native.shiftKey,
+      altKey: native.altKey,
+      ctrlKey: native.ctrlKey,
+      metaKey: native.metaKey,
+      button: native.button,
+      clientX: native.clientX,
+      clientY: native.clientY,
+      instanceId: resolved.index,
+    })
+  }, [interactionsEnabled, itemForEvent, onPanelContextMenu])
 
   const releasePointer = useCallback((active: ActiveDrag): void => {
     try {
@@ -490,6 +511,7 @@ export const PanelBatch = forwardRef(function PanelBatch(
         onPointerUp: (event: ThreeEvent<PointerEvent>): void => { finishDrag(event) },
         onPointerCancel: (event: ThreeEvent<PointerEvent>): void => { finishDrag(event) },
         onLostPointerCapture: (event: ThreeEvent<PointerEvent>): void => { handleLostPointerCapture(event) },
+        onContextMenu: (event: ThreeEvent<MouseEvent>): void => { handleContextMenu(event, items) },
       } : { raycast: NO_PANEL_RAYCAST },
       // Cell bars sit on top of the glass but are visual details only. Keep
       // them out of the raycast list so the panel's glass/frame receives one
@@ -497,7 +519,7 @@ export const PanelBatch = forwardRef(function PanelBatch(
       horizontalCell: PANEL_CELL_INTERACTION_PROPS,
       verticalCell: PANEL_CELL_INTERACTION_PROPS,
     }
-  }), [finishDrag, handleLostPointerCapture, handlePointerDown, handlePointerMove, interactionsEnabled, stateItems])
+  }), [finishDrag, handleContextMenu, handleLostPointerCapture, handlePointerDown, handlePointerMove, interactionsEnabled, stateItems])
 
   return (
     <group ref={setGroupRef} name={`pv-panel-batch-${batch.key}`}>
