@@ -14,6 +14,7 @@ import {
 import { createDemoViewerModel } from './demoScene'
 import { cameraNorthAngleDegrees, computeViewerFrame, computeViewerFrameFromBounds, createViewerOrthographicFrustum, fitViewerCamera, perspectiveWorldUnitsPerPixel } from './framing'
 import { loadViewerModel } from './modelLoader'
+import { formatViewerCount } from './metadata'
 import { cancelViewerPointers, createViewerPointerTracker, type ViewerPointerTracker } from './pointerTracker'
 import { applyViewerRenderMode } from './renderMode'
 import { createViewerCanvasConfig } from './canvasConfig'
@@ -159,16 +160,22 @@ function ModelStatus({ progress, error }: { progress: ViewerLoadProgress | null;
 }
 
 function MetadataOverlay({ metadata, surfaceCount }: { metadata: ViewerModelMetadata; surfaceCount: number }): ReactNode {
+  // OBJ source counts are stable across render backends. Rendered BufferGeometry
+  // counts can legitimately differ when a loader expands UV or normal seams,
+  // so prefer the parser-owned source measurements for user-facing survey
+  // identity and automated acceptance evidence.
+  const vertexCount = metadata.sourceVertexCount ?? metadata.vertexCount
+  const polygonCount = metadata.sourcePolygonCount ?? metadata.polygonCount
   return (
     <details open style={{ ...overlayStyle, top: 12, left: 12, maxWidth: 220, pointerEvents: 'auto' }}>
       <summary style={{ cursor: 'pointer', padding: '6px 9px', borderRadius: 8, background: 'rgba(255,255,255,.86)', boxShadow: '0 2px 12px rgba(20,40,38,.08)' }}>
         {metadata.isDemo ? 'Demo survey site' : metadata.name}
       </summary>
       <div style={{ marginTop: 5, padding: '8px 10px', borderRadius: 8, background: 'rgba(255,255,255,.92)', boxShadow: '0 2px 12px rgba(20,40,38,.08)', lineHeight: 1.55 }}>
-        <div>{metadata.vertexCount.toLocaleString()} vertices</div>
-        <div>{metadata.polygonCount.toLocaleString()} polygons</div>
-        <div>{metadata.meshCount.toLocaleString()} meshes</div>
-        <div>{surfaceCount.toLocaleString()} design surfaces</div>
+        <div>{formatViewerCount(vertexCount)} vertices</div>
+        <div>{formatViewerCount(polygonCount)} polygons</div>
+        <div>{formatViewerCount(metadata.meshCount)} meshes</div>
+        <div>{formatViewerCount(surfaceCount)} design surfaces</div>
         <div>{metadata.boundingBox.size.x.toFixed(1)} × {metadata.boundingBox.size.z.toFixed(1)} m</div>
       </div>
     </details>
