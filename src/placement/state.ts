@@ -1418,6 +1418,17 @@ export class PlacementStore {
     return changed && created !== undefined ? deepFreeze(clonePlacement(created)) : undefined
   }
 
+  /** Validate a prospective panel without changing selection, history or ids. */
+  public previewPanel(input: unknown): PanelPlacement | undefined {
+    if (!isRecord(input) || !validString(input.panelId) || !isFinitePoint(input.localCenter)
+      || (input.surfaceId !== undefined && !validString(input.surfaceId))
+      || (input.groupId !== undefined && !validString(input.groupId))) return undefined
+    const allocation = this.nextId('__panel-slot-preview__')
+    const placement = this.makePlacement(input as unknown as AddPlacementInput, allocation.id)
+    if (placement === undefined || !this.canPlace(placement)) return undefined
+    return deepFreeze(clonePlacement(placement))
+  }
+
   public beginManualPlacement(input: unknown): boolean {
     if (!isRecord(input) || !validString(input.panelId)
       || (input.surfaceId !== undefined && !validString(input.surfaceId))
@@ -1601,6 +1612,62 @@ export class PlacementStore {
     })
   }
 
+  /** Rotate one complete panel group through 90 degrees around its centre. */
+  public rotateGroup(clockwise = true, ids: readonly string[] = this.state.selectedIds): boolean {
+    if (typeof clockwise !== 'boolean' || !isStringList(ids) || ids.length === 0) return false
+    const selected = new Set(ids.filter((id) => this.state.placements[id] !== undefined))
+    if (selected.size === 0) return false
+    const placements = [...selected].map((id) => this.state.placements[id]).filter((placement): placement is PanelPlacement => placement !== undefined)
+    const groupId = placements[0]?.groupId
+    const surfaceId = placements[0]?.surfaceId
+    if (groupId === undefined || surfaceId === undefined
+      || placements.some((placement) => placement.groupId !== groupId || placement.surfaceId !== surfaceId)
+      || Object.values(this.state.placements).some((placement) => placement.groupId === groupId && !selected.has(placement.id))) return false
+
+    const centre = placements.reduce((sum, placement) => ({
+      x: sum.x + placement.localCenter.x / placements.length,
+      y: sum.y + placement.localCenter.y / placements.length,
+    }), { x: 0, y: 0 })
+    const currentSettings = this.settingsFor(groupId)
+    const rotatedSettings: PanelGroupSettings = {
+      ...currentSettings,
+      orientation: currentSettings.orientation === 'portrait' ? 'landscape' : 'portrait',
+      interPanelSpacingM: currentSettings.rowSpacingM,
+      rowSpacingM: currentSettings.interPanelSpacingM,
+    }
+    return this.update((state) => {
+      const changed: Record<string, PanelPlacement> = { ...state.placements }
+      const candidates: PanelPlacement[] = []
+      for (const current of placements) {
+        const offsetX = current.localCenter.x - centre.x
+        const offsetY = current.localCenter.y - centre.y
+        const candidate: PanelPlacement = {
+          ...current,
+          localCenter: clockwise
+            ? { x: centre.x + offsetY, y: centre.y - offsetX }
+            : { x: centre.x - offsetY, y: centre.y + offsetX },
+          orientation: current.orientation === 'portrait' ? 'landscape' : 'portrait',
+        }
+        if (!this.canPlace(candidate, selected, rotatedSettings)) return undefined
+        changed[current.id] = candidate
+        candidates.push(candidate)
+      }
+      if (!pairwiseSpacingValid(
+        candidates,
+        this.definitions,
+        (candidateGroupId) => candidateGroupId === groupId ? rotatedSettings : this.settingsFor(candidateGroupId),
+        (candidateSurfaceId) => this.surface(candidateSurfaceId),
+        (candidateSurfaceId) => this.surfaceEdgeMetadata(candidateSurfaceId),
+      )) return undefined
+      return {
+        ...state,
+        placements: changed,
+        selectedIds: [...selected],
+        groupSettings: { ...state.groupSettings, [groupId]: rotatedSettings },
+      }
+    })
+  }
+
   public setOrientation(orientation: unknown, ids: unknown = this.state.selectedIds): boolean {
     if (!isOrientation(orientation) || !isStringList(ids) || ids.length === 0) return false
     const selected = new Set(ids.filter((id) => this.state.placements[id] !== undefined))
@@ -1660,10 +1727,54 @@ export class PlacementStore {
   public setGroupSettings(groupId: unknown, patch: unknown): boolean {
     if (!validString(groupId)) return false
     return this.update((state) => {
-      const settings = mergeSettings(this.settingsFor(groupId), patch)
-      return settings === undefined || settingsEqual(settings, this.settingsFor(groupId))
-        ? undefined
-        : { ...state, groupSettings: { ...state.groupSettings, [groupId]: settings } }
+      const currentSettings = this.settingsFor(groupId)
+      const settings = mergeSettings(currentSettings, patch)
+      if (settings === undefined || settingsEqual(settings, currentSettings)) return undefined
+
+      const currentGroup = Object.values(state.placements).filter((placement) => placement.groupId === groupId)
+      if (currentGroup.length === 0) return { ...state, groupSettings: { ...state.groupSettings, [groupId]: settings } }
+      const first = currentGroup[0]
+      if (first === undefined || currentGroup.some((placement) => placement.panelId !== first.panelId
+        || placement.surfaceId !== first.surfaceId || placement.orientation !== first.orientation)) return undefined
+      const panel = this.definitions[first.panelId]
+      if (!validPanel(panel)) return undefined
+
+      const footprint = orientedFootprint(panel, first.orientation)
+      const oldStepX = footprint.widthM + currentSettings.interPanelSpacingM
+      const oldStepY = footprint.heightM + currentSettings.rowSpacingM
+      const newStepX = footprint.widthM + settings.interPanelSpacingM
+      const newStepY = footprint.heightM + settings.rowSpacingM
+      if (oldStepX <= 0 || oldStepY <= 0 || newStepX <= 0 || newStepY <= 0) return undefined
+      const centre = currentGroup.reduce((sum, placement) => ({
+        x: sum.x + placement.localCenter.x / currentGroup.length,
+        y: sum.y + placement.localCenter.y / currentGroup.length,
+      }), { x: 0, y: 0 })
+      const spacingChanged = settings.interPanelSpacingM !== currentSettings.interPanelSpacingM
+        || settings.rowSpacingM !== currentSettings.rowSpacingM
+      const ignored = new Set(currentGroup.map((placement) => placement.id))
+      const candidates = currentGroup.map((placement): PanelPlacement => ({
+        ...placement,
+        localCenter: spacingChanged
+          ? {
+              x: centre.x + (placement.localCenter.x - centre.x) * newStepX / oldStepX,
+              y: centre.y + (placement.localCenter.y - centre.y) * newStepY / oldStepY,
+            }
+          : placement.localCenter,
+        orientation: settings.orientation,
+        clearanceM: settings.clearanceM,
+        tiltDeg: settings.tiltDeg,
+      }))
+      if (candidates.some((candidate) => !this.canPlace(candidate, ignored, settings))) return undefined
+      if (!pairwiseSpacingValid(
+        candidates,
+        this.definitions,
+        (candidateGroupId) => candidateGroupId === groupId ? settings : this.settingsFor(candidateGroupId),
+        (surfaceId) => this.surface(surfaceId),
+        (surfaceId) => this.surfaceEdgeMetadata(surfaceId),
+      )) return undefined
+      const placements = { ...state.placements }
+      for (const candidate of candidates) placements[candidate.id] = candidate
+      return { ...state, placements, groupSettings: { ...state.groupSettings, [groupId]: settings } }
     })
   }
 

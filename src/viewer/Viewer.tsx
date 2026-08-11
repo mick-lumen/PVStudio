@@ -19,7 +19,6 @@ import { cancelViewerPointers, createViewerPointerTracker, type ViewerPointerTra
 import { applyViewerRenderMode } from './renderMode'
 import { createViewerCanvasConfig } from './canvasConfig'
 import {
-  createViewerHighlightGeometry,
   createViewerSurfaceIndexAsync,
   disableViewerModelRaycasts,
   type ViewerSurfaceHit,
@@ -188,20 +187,6 @@ function MetadataOverlay({ metadata, surfaceCount }: { metadata: ViewerModelMeta
         <div>{metadata.boundingBox.size.x.toFixed(1)} × {metadata.boundingBox.size.z.toFixed(1)} m</div>
       </div>
     </details>
-  )
-}
-
-function Highlight({ hit, targetParent }: { hit: ViewerSurfaceHit; targetParent?: THREE.Object3D }): ReactNode {
-  const geometry = useMemo(() => createViewerHighlightGeometry(hit.mesh, hit.selection, targetParent), [hit, targetParent])
-  useEffect(() => {
-    return () => {
-      geometry.dispose()
-    }
-  }, [geometry])
-  return (
-    <mesh geometry={geometry} renderOrder={10}>
-      <meshBasicMaterial color="#2e9cff" transparent opacity={0.34} depthWrite={false} side={THREE.DoubleSide} polygonOffset polygonOffsetFactor={-1} />
-    </mesh>
   )
 }
 
@@ -737,7 +722,6 @@ function ViewerScene({ model, progress, cameraMode, renderMode, surfaceInteracti
         {model.index !== null && <primitive object={surfacePicker} />}
         <primitive object={model.loaded.object} />
         {sceneContent}
-        {model.index !== null && selected.map((hit) => <Highlight key={hit.selection.surface.id} hit={hit} targetParent={model.loaded.object.parent ?? undefined} />)}
       </group>
       {cameraMode === 'orthographic' && showGrid && <gridHelper args={[gridExtent, 24, '#9ab0aa', '#c5d2cf']} position={[0, gridY, 0]} />}
       <CameraMetrics frame={model.frame} target={fit.target} onChange={onCameraMetrics} />

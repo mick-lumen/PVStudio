@@ -463,6 +463,33 @@ describe('Shell', () => {
     expect(screen.getByText('Setback 200 mm · row 30 mm')).toBeInTheDocument()
   })
 
+  it('exposes move and rotate actions for the selected panel group', () => {
+    const onMoveSelection = vi.fn()
+    const onRotateSelection = vi.fn()
+    render(
+      <Shell
+        settings={settings}
+        selectedPlacementIds={['placement-a', 'placement-b']}
+        onMoveSelection={onMoveSelection}
+        onRotateSelection={onRotateSelection}
+        webglAvailable={true}
+      />,
+    )
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Inspector' }))
+    expect(screen.getByRole('tab', { name: 'Inspector' })).toHaveAttribute('aria-selected', 'true')
+    expect(screen.getByRole('heading', { name: 'Panel group' })).toBeInTheDocument()
+    expect(screen.getByText('2 panels', { selector: '.surface-status' })).toBeInTheDocument()
+    expect(screen.getByRole('spinbutton', { name: 'Horizontal module spacing in metres' })).toHaveValue(settings.interPanelSpacingM)
+    expect(screen.getByRole('spinbutton', { name: 'Vertical module spacing in metres' })).toHaveValue(settings.rowSpacingM)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Move array' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Rotate 90°' }))
+    expect(onMoveSelection).toHaveBeenCalledTimes(1)
+    expect(onRotateSelection).toHaveBeenCalledTimes(1)
+    expect(screen.getByLabelText('Workspace status')).toHaveTextContent('Array rotated 90 degrees')
+  })
+
   it('keeps optional auto-fill controls unset for legacy settings and validates edits', () => {
     const onSettingsChange = vi.fn()
     const { rerender } = render(<Shell settings={settings} settingsScopeLabel="Group array-1" onSettingsChange={onSettingsChange} webglAvailable={true} />)

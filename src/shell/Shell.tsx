@@ -17,6 +17,7 @@ import {
   PanelsTopLeft,
   Plus,
   Redo2,
+  RotateCw,
   Settings2,
   SlidersHorizontal,
   Sparkles,
@@ -145,6 +146,8 @@ export interface ShellProps {
   readonly onUndo?: () => void
   readonly onRedo?: () => void
   readonly onDelete?: (ids: readonly string[]) => void
+  readonly onMoveSelection?: () => void
+  readonly onRotateSelection?: () => void
   /** Optional host actions for the shell's utility controls. */
   readonly onFitView?: () => void
   readonly onHelp?: () => void
@@ -492,7 +495,7 @@ function SettingsSummary({ settings, scopeLabel, onChange }: { readonly settings
   const changeNumber = (key: 'setbackM' | 'interPanelSpacingM' | 'rowSpacingM' | 'clearanceM' | 'tiltDeg', rawValue: string): void => {
     const value = parseFiniteInput(rawValue)
     if (value === undefined) return
-    if (key === 'clearanceM' && value < 0) return
+    if (key !== 'tiltDeg' && value < 0) return
     if (key === 'tiltDeg' && (value < 0 || value > 90)) return
     change({ [key]: value })
   }
@@ -516,8 +519,8 @@ function SettingsSummary({ settings, scopeLabel, onChange }: { readonly settings
       <p className="inspector-note settings-scope" data-testid="settings-scope">Editing {scopeLabel ?? 'Global defaults'}</p>
       <label className="setting-row"><span>Orientation</span><select value={settings.orientation} disabled={disabled} aria-label="Panel orientation" onChange={(event) => { change({ orientation: event.currentTarget.value as Orientation }); }}><option value="portrait">Portrait</option><option value="landscape">Landscape</option></select></label>
       <label className="setting-row"><span>Edge setback</span><span className="input-with-unit"><input type="number" min={0} step={0.01} value={numericInputValue(settings.setbackM)} disabled={disabled} aria-label="Edge setback in metres" onChange={(event) => { changeNumber('setbackM', event.currentTarget.value) }} /><small>m</small></span></label>
-      <label className="setting-row"><span>Panel spacing</span><span className="input-with-unit"><input type="number" min={0} step={0.01} value={numericInputValue(settings.interPanelSpacingM)} disabled={disabled} aria-label="Panel spacing in metres" onChange={(event) => { changeNumber('interPanelSpacingM', event.currentTarget.value) }} /><small>m</small></span></label>
-      <label className="setting-row"><span>Row spacing</span><span className="input-with-unit"><input type="number" min={0} step={0.01} value={numericInputValue(settings.rowSpacingM)} disabled={disabled} aria-label="Row spacing in metres" onChange={(event) => { changeNumber('rowSpacingM', event.currentTarget.value) }} /><small>m</small></span></label>
+      <label className="setting-row"><span>Horizontal module spacing</span><span className="input-with-unit"><input type="number" min={0} step={0.01} value={numericInputValue(settings.interPanelSpacingM)} disabled={disabled} aria-label="Horizontal module spacing in metres" onChange={(event) => { changeNumber('interPanelSpacingM', event.currentTarget.value) }} /><small>m</small></span></label>
+      <label className="setting-row"><span>Vertical module spacing</span><span className="input-with-unit"><input type="number" min={0} step={0.01} value={numericInputValue(settings.rowSpacingM)} disabled={disabled} aria-label="Vertical module spacing in metres" onChange={(event) => { changeNumber('rowSpacingM', event.currentTarget.value) }} /><small>m</small></span></label>
       <label className="setting-row"><span>Clearance</span><span className="input-with-unit"><input type="number" min={0} step={0.01} value={numericInputValue(settings.clearanceM)} disabled={disabled} aria-label="Panel clearance in metres" onChange={(event) => { changeNumber('clearanceM', event.currentTarget.value) }} /><small>m</small></span></label>
       <label className="setting-row"><span>Tilt</span><span className="input-with-unit"><input type="number" min={0} max={90} step={1} value={numericInputValue(settings.tiltDeg)} disabled={disabled} aria-label="Panel tilt in degrees" onChange={(event) => { changeNumber('tiltDeg', event.currentTarget.value) }} /><small>°</small></span></label>
       <div className="inspector-subheading">Auto-fill controls</div>
@@ -540,6 +543,20 @@ function PlacementSummary({ summary }: { readonly summary: PanelPlacementSummary
         <div><dt>Dragging</dt><dd>{String(summary.draggingCount)}</dd></div>
       </dl>
       {summary.totalWattageW === undefined ? null : <p className="inspector-note"><ZapIcon aria-hidden={true} /> {String(summary.totalWattageW)} W nominal</p>}
+    </section>
+  )
+}
+
+function ArrayActions({ selectedCount, onMove, onRotate }: { readonly selectedCount: number; readonly onMove?: () => void; readonly onRotate?: () => void }): ReactNode {
+  if (selectedCount === 0) return null
+  return (
+    <section className="inspector-card" aria-labelledby="array-actions-title">
+      <div className="inspector-card__title-row"><h3 id="array-actions-title">Panel group</h3><span className="surface-status"><span aria-hidden="true" />{String(selectedCount)} panels</span></div>
+      <div className="array-action-grid">
+        <button className="button button--quiet" type="button" disabled={onMove === undefined} onClick={onMove}><Move3d size={15} aria-hidden="true" />Move array</button>
+        <button className="button button--quiet" type="button" disabled={onRotate === undefined} onClick={onRotate}><RotateCw size={15} aria-hidden="true" />Rotate 90°</button>
+      </div>
+      <p className="inspector-note">Drag any highlighted panel to move the complete array. White outlines add the next panel.</p>
     </section>
   )
 }
@@ -600,13 +617,14 @@ function ObstacleSummary({ obstacles, draftObstacle, onChange, onRemove, onClear
   )
 }
 
-function InspectorFallback({ selectedSurface, selectedSurfaceEdge, onSurfaceEdgeChange, selectedPanel, settings, settingsScopeLabel, onSettingsChange, placementSummary, onAutoFill, obstacles, draftObstacle, onObstacleChange, onObstacleRemove, onObstaclesClear }: { readonly selectedSurface?: ShellSurface | null; readonly selectedSurfaceEdge?: ShellSurfaceEdge | null; readonly onSurfaceEdgeChange?: (edge: SurfaceEdgeMetadata | undefined) => void; readonly selectedPanel?: ShellPanel | null; readonly settings?: PanelGroupSettings; readonly settingsScopeLabel?: string; readonly onSettingsChange?: (patch: Partial<PanelGroupSettings>) => void; readonly placementSummary?: PanelPlacementSummary; readonly onAutoFill?: () => void; readonly obstacles?: readonly RectangularObstacle[]; readonly draftObstacle?: RectangularObstacle | null; readonly onObstacleChange?: (id: string, patch: ObstacleGeometryPatch) => void; readonly onObstacleRemove?: (id: string) => void; readonly onObstaclesClear?: () => void }): ReactNode {
+function InspectorFallback({ selectedSurface, selectedSurfaceEdge, onSurfaceEdgeChange, selectedPanel, settings, settingsScopeLabel, onSettingsChange, selectedCount, onMoveSelection, onRotateSelection, placementSummary, onAutoFill, obstacles, draftObstacle, onObstacleChange, onObstacleRemove, onObstaclesClear }: { readonly selectedSurface?: ShellSurface | null; readonly selectedSurfaceEdge?: ShellSurfaceEdge | null; readonly onSurfaceEdgeChange?: (edge: SurfaceEdgeMetadata | undefined) => void; readonly selectedPanel?: ShellPanel | null; readonly settings?: PanelGroupSettings; readonly settingsScopeLabel?: string; readonly onSettingsChange?: (patch: Partial<PanelGroupSettings>) => void; readonly selectedCount: number; readonly onMoveSelection?: () => void; readonly onRotateSelection?: () => void; readonly placementSummary?: PanelPlacementSummary; readonly onAutoFill?: () => void; readonly obstacles?: readonly RectangularObstacle[]; readonly draftObstacle?: RectangularObstacle | null; readonly onObstacleChange?: (id: string, patch: ObstacleGeometryPatch) => void; readonly onObstacleRemove?: (id: string) => void; readonly onObstaclesClear?: () => void }): ReactNode {
   if (selectedSurface === undefined && selectedPanel === undefined && settings === undefined && placementSummary === undefined && obstacles === undefined) return <EmptySlot label="Inspector" />
   return (
     <div className="inspector-content">
       <div className="inspector-heading"><div><p className="eyebrow">Inspector</p><h2>{selectedSurface?.label ?? 'Selection'}</h2></div><span className="surface-status"><span aria-hidden="true" />Active</span></div>
       {selectedSurface === null ? <EmptySlot label="Surface" /> : selectedSurface === undefined ? null : <SurfaceSummary surface={selectedSurface} edge={selectedSurfaceEdge} onEdgeChange={onSurfaceEdgeChange} />}
       {selectedPanel === null ? null : selectedPanel === undefined ? null : <PanelSummary panel={selectedPanel} />}
+      <ArrayActions selectedCount={selectedCount} onMove={onMoveSelection} onRotate={onRotateSelection} />
       {settings === undefined ? null : <SettingsSummary settings={settings} scopeLabel={settingsScopeLabel} onChange={onSettingsChange} />}
       {placementSummary === undefined ? null : <PlacementSummary summary={placementSummary} />}
       {obstacles === undefined ? null : <ObstacleSummary obstacles={obstacles} draftObstacle={draftObstacle} onChange={onObstacleChange} onRemove={onObstacleRemove} onClear={onObstaclesClear} />}
@@ -731,6 +749,8 @@ export function Shell({
   onUndo,
   onRedo,
   onDelete,
+  onMoveSelection,
+  onRotateSelection,
   onFitView,
   onHelp,
   onLayersOpen,
@@ -864,6 +884,14 @@ export function Shell({
   }, [alignStage])
 
   const announce = useCallback((message: string): void => { setLocalStatus(message) }, [])
+  const moveSelection = useCallback((): void => {
+    onMoveSelection?.()
+    announce('Move array active — drag any highlighted panel')
+  }, [announce, onMoveSelection])
+  const rotateSelection = useCallback((): void => {
+    onRotateSelection?.()
+    announce('Array rotated 90 degrees')
+  }, [announce, onRotateSelection])
   const handleThemeChange = useCallback((): void => {
     const next = theme === 'light' ? 'dark' : 'light'
     if (controlledTheme === undefined) setThemeState(next)
@@ -1094,7 +1122,7 @@ export function Shell({
         {rightPanelOpen ? <button className="inspector-backdrop" type="button" aria-label="Dismiss side panel" onClick={closeRightPanel} /> : null}
         <aside id="workspace-side-panel" className={`inspector-panel${rightPanelOpen ? ' inspector-panel--open' : ''}`} aria-label="Panel library and inspector" aria-hidden={!rightPanelOpen} inert={!rightPanelOpen}>
           <div className="inspector-tabs" role="tablist" aria-orientation="horizontal" aria-label="Workspace side panel"><button ref={panelTabRef} className={`inspector-tab${selectedTab === 'panel' ? ' inspector-tab--active' : ''}`} id="panel-tab" type="button" role="tab" aria-selected={selectedTab === 'panel'} aria-controls="panel-panel" tabIndex={selectedTab === 'panel' ? 0 : -1} onKeyDown={handleInspectorTabKeyDown} onClick={() => { setSelectedTab('panel'); }}><PanelsTopLeft size={15} aria-hidden="true" />Panel</button><button ref={inspectorTabRef} className={`inspector-tab${selectedTab === 'inspector' ? ' inspector-tab--active' : ''}`} id="inspector-tab" type="button" role="tab" aria-selected={selectedTab === 'inspector'} aria-controls="inspector-panel" tabIndex={selectedTab === 'inspector' ? 0 : -1} onKeyDown={handleInspectorTabKeyDown} onClick={() => { setSelectedTab('inspector'); }}><Settings2 size={15} aria-hidden="true" />Inspector</button><button className="inspector-close icon-button icon-button--small" type="button" aria-label="Close side panel" onClick={closeRightPanel}><X size={15} aria-hidden="true" /></button></div>
-          <div className="inspector-panel__body">{selectedTab === 'panel' ? <div id="panel-panel" role="tabpanel" aria-labelledby="panel-tab"><ShellErrorBoundary area="panel library" resetKey={panelSlot ?? `empty-library:${hasImportHandler ? 'ready' : 'disabled'}`}>{panelSlot ?? <EmptySlot label="Panel library" action={hasImportHandler ? 'Import site model' : undefined} onAction={hasImportHandler ? handleImportClick : undefined} />}</ShellErrorBoundary></div> : <div id="inspector-panel" role="tabpanel" aria-labelledby="inspector-tab"><ShellErrorBoundary area="inspector" resetKey={inspector ?? settingsScopeLabel ?? settings ?? selectedSurface ?? selectedSurfaceEdge ?? selectedPanel ?? summary ?? obstacles ?? 'fallback-inspector'}>{inspector ?? <InspectorFallback selectedSurface={selectedSurface} selectedSurfaceEdge={selectedSurfaceEdge} onSurfaceEdgeChange={onSurfaceEdgeChange} selectedPanel={selectedPanel} settings={settings} settingsScopeLabel={settingsScopeLabel} onSettingsChange={onSettingsChange} placementSummary={summary} onAutoFill={onAutoFill} obstacles={obstacles} draftObstacle={draftObstacle} onObstacleChange={onObstacleChange} onObstacleRemove={onObstacleRemove} onObstaclesClear={onObstaclesClear} />}</ShellErrorBoundary>{panelStatus === undefined ? null : <div className="panel-status-slot"><ShellErrorBoundary area="panel status" resetKey={panelStatus}>{panelStatus}</ShellErrorBoundary></div>}{panelStatus === undefined && summary === undefined ? null : panelStatus === undefined ? <div className="panel-status-slot"><PlacementSummary summary={summary as PanelPlacementSummary} /></div> : null}</div>}</div>
+          <div className="inspector-panel__body">{selectedTab === 'panel' ? <div id="panel-panel" role="tabpanel" aria-labelledby="panel-tab"><ShellErrorBoundary area="panel library" resetKey={panelSlot ?? `empty-library:${hasImportHandler ? 'ready' : 'disabled'}`}>{panelSlot ?? <EmptySlot label="Panel library" action={hasImportHandler ? 'Import site model' : undefined} onAction={hasImportHandler ? handleImportClick : undefined} />}</ShellErrorBoundary></div> : <div id="inspector-panel" role="tabpanel" aria-labelledby="inspector-tab"><ShellErrorBoundary area="inspector" resetKey={inspector ?? settingsScopeLabel ?? settings ?? selectedSurface ?? selectedSurfaceEdge ?? selectedPanel ?? summary ?? obstacles ?? 'fallback-inspector'}>{inspector ?? <InspectorFallback selectedSurface={selectedSurface} selectedSurfaceEdge={selectedSurfaceEdge} onSurfaceEdgeChange={onSurfaceEdgeChange} selectedPanel={selectedPanel} settings={settings} settingsScopeLabel={settingsScopeLabel} onSettingsChange={onSettingsChange} selectedCount={selectedPlacementIds.length} onMoveSelection={onMoveSelection === undefined ? undefined : moveSelection} onRotateSelection={onRotateSelection === undefined ? undefined : rotateSelection} placementSummary={summary} onAutoFill={onAutoFill} obstacles={obstacles} draftObstacle={draftObstacle} onObstacleChange={onObstacleChange} onObstacleRemove={onObstacleRemove} onObstaclesClear={onObstaclesClear} />}</ShellErrorBoundary>{panelStatus === undefined ? null : <div className="panel-status-slot"><ShellErrorBoundary area="panel status" resetKey={panelStatus}>{panelStatus}</ShellErrorBoundary></div>}{panelStatus === undefined && summary === undefined ? null : panelStatus === undefined ? <div className="panel-status-slot"><PlacementSummary summary={summary as PanelPlacementSummary} /></div> : null}</div>}</div>
         </aside>
         {!rightPanelOpen ? <button ref={reopenInspectorRef} className="reopen-inspector" type="button" aria-controls="workspace-side-panel" aria-expanded={rightPanelOpen} onClick={() => { setRightPanelOpen(true); }}><PanelTop size={15} aria-hidden="true" />Open panel</button> : null}
       </div>

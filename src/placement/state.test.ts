@@ -144,6 +144,37 @@ describe('PlacementStore manual placement and selection', () => {
     expect(store.moveGroup({ x: 20, y: 0 })).toBe(false)
   })
 
+  it('previews adjacent positions without mutation and rotates complete groups atomically', () => {
+    const store = makeStore()
+    const first = store.addPanel({ panelId: panel.id, surfaceId: 'roof', localCenter: { x: 3, y: 2.5 }, groupId: 'array-a', id: 'a-1' })
+    const second = store.addPanel({ panelId: panel.id, surfaceId: 'roof', localCenter: { x: 4.1, y: 2.5 }, groupId: 'array-a', id: 'a-2' })
+    expect(first).toBeDefined()
+    expect(second).toBeDefined()
+    const beforePreview = store.getSnapshot()
+    expect(store.previewPanel({ panelId: panel.id, surfaceId: 'roof', localCenter: { x: 5.2, y: 2.5 }, groupId: 'array-a' })?.id).toBe('__panel-slot-preview__')
+    expect(store.getSnapshot()).toBe(beforePreview)
+    expect(store.previewPanel({ panelId: panel.id, surfaceId: 'roof', localCenter: { x: 4.1, y: 2.5 }, groupId: 'array-a' })).toBeUndefined()
+
+    store.selectPanels(['a-1', 'a-2'])
+    expect(store.rotateGroup(true)).toBe(true)
+    expect(store.getState().placements['a-1']?.orientation).toBe('landscape')
+    expect(store.getState().placements['a-1']?.localCenter.x).toBeCloseTo(3.55)
+    expect(store.getState().placements['a-1']?.localCenter.y).toBeCloseTo(3.05)
+    expect(store.getState().placements['a-2']?.orientation).toBe('landscape')
+    expect(store.getState().placements['a-2']?.localCenter.x).toBeCloseTo(3.55)
+    expect(store.getState().placements['a-2']?.localCenter.y).toBeCloseTo(1.95)
+    expect(store.getGroupSettings('array-a')).toMatchObject({ orientation: 'landscape', interPanelSpacingM: 0.2, rowSpacingM: 0.1 })
+    expect(store.undo()).toBe(true)
+    expect(store.getState().placements['a-1']?.orientation).toBe('portrait')
+  })
+
+  it('refuses to rotate a partial group', () => {
+    const store = makeStore()
+    store.addPanel({ panelId: panel.id, surfaceId: 'roof', localCenter: { x: 3, y: 2.5 }, groupId: 'array-a', id: 'a-1' })
+    store.addPanel({ panelId: panel.id, surfaceId: 'roof', localCenter: { x: 4.1, y: 2.5 }, groupId: 'array-a', id: 'a-2' })
+    expect(store.rotateGroup(true, ['a-1'])).toBe(false)
+  })
+
   it('rejects unknown surfaces in every surface-targeted workflow', () => {
     const store = makeStore()
     expect(store.setActiveSurface('missing')).toBe(false)
@@ -544,6 +575,19 @@ describe('PlacementStore auto-fill, history and selectors', () => {
     const exposed = store.getGroupSettings('array-a') as unknown as { interPanelSpacingM: number }
     expect(() => { exposed.interPanelSpacingM = 0 }).toThrow()
     expect(store.getGroupSettings('array-a').interPanelSpacingM).toBe(0.45)
+  })
+
+  it('reflows an existing group when its module spacing changes', () => {
+    const store = makeStore()
+    store.addPanel({ panelId: panel.id, surfaceId: 'roof', localCenter: { x: 3, y: 2.5 }, groupId: 'array-a', id: 'a-1' })
+    store.addPanel({ panelId: panel.id, surfaceId: 'roof', localCenter: { x: 4.1, y: 2.5 }, groupId: 'array-a', id: 'a-2' })
+
+    expect(store.setGroupSettings('array-a', { interPanelSpacingM: 0.5, clearanceM: 0.2, tiltDeg: 10 })).toBe(true)
+    expect(store.getState().placements['a-1']?.localCenter.x).toBeCloseTo(2.8)
+    expect(store.getState().placements['a-2']?.localCenter.x).toBeCloseTo(4.3)
+    expect(store.getState().placements['a-1']).toMatchObject({ clearanceM: 0.2, tiltDeg: 10 })
+    expect(store.undo()).toBe(true)
+    expect(store.getState().placements['a-1']?.localCenter.x).toBeCloseTo(3)
   })
 
   it('clears optional auto-fill settings and restores them through undo and redo', () => {

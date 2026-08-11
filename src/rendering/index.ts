@@ -11,6 +11,11 @@ export {
   type PanelLayerProps,
 } from './PanelLayer'
 export {
+  PanelSlotOutlines,
+  type PanelSlotOutline,
+  type PanelSlotOutlinesProps,
+} from './PanelSlotOutlines'
+export {
   ObstacleLayer,
   NO_OBSTACLE_RAYCAST,
   type ObstacleLayerProps,

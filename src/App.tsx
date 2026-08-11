@@ -21,6 +21,7 @@ import { projectPointToSurface } from './core'
 import { PANEL_CATALOG, toPanelDefinition, type PanelSpec } from './data'
 import {
   createPlacementStore,
+  createAdjacentPanelSlots,
   editableGroupIdFor,
   type PlacementState,
   type PlacementStore,
@@ -29,8 +30,10 @@ import {
 import { PanelChooser } from './panels'
 import {
   PanelLayer,
+  PanelSlotOutlines,
   PanelRenderStatus,
   ObstacleLayer,
+  type PanelSlotOutline,
   type PanelPointerInfo,
 } from './rendering'
 import {
@@ -73,6 +76,7 @@ export interface AppProps {
 }
 
 const CATALOG_DEFINITIONS: readonly PanelDefinition[] = Object.freeze(PANEL_CATALOG.map((panel) => toPanelDefinition(panel)))
+const EMPTY_PANEL_DEFINITIONS: readonly PanelDefinition[] = Object.freeze([])
 
 const pointFromPointer = (surface: SurfaceDescriptor | undefined, info: PanelPointerInfo): Point2 | undefined => {
   if (surface === undefined) return undefined
@@ -369,7 +373,7 @@ export function App({
   )
   const selectedPanel = useMemo(() => selectedPanelFor(panelSpecs, selectedPanelId), [selectedPanelId, panelSpecs])
   const panelVisuals = useMemo(() => createPanelVisuals(panelSpecs), [panelSpecs])
-  const definitions = store.context.panels ?? []
+  const definitions = store.context.panels ?? EMPTY_PANEL_DEFINITIONS
   const placements = useMemo(() => placementValues(placementState), [placementState])
   const activeSurface = selectedSurfaceFor(surfaces, placementState)
   const surfaceEdgeOverrides = store.context.gutters
@@ -754,10 +758,12 @@ export function App({
     // multi-selection intact when the pointer starts on one of its panels so
     // dragging that panel moves the complete group; a click on an unselected
     // panel (or an explicit Shift gesture) still applies normal selection.
-    const selected = store.getSnapshot().selectedIds
-    if (info.shiftKey || !selected.includes(placement.id)) {
-      store.selectPanels([placement.id], info.shiftKey)
-    }
+    const snapshot = store.getSnapshot()
+    const groupIds = placement.groupId === undefined
+      ? [placement.id]
+      : Object.values(snapshot.placements).filter((candidate) => candidate.groupId === placement.groupId).map((candidate) => candidate.id)
+    if (info.shiftKey) store.selectPanels([placement.id], true)
+    else store.selectPanels(groupIds)
     store.setActiveSurface(placement.surfaceId)
   }, [store])
   const handlePanelDragStart = useCallback((placement: PanelPlacement, info: PanelPointerInfo): void => {
@@ -848,8 +854,17 @@ export function App({
   }, [store])
 
   const handleSettings = useCallback((patch: Partial<PlacementState['settings']>): void => {
-    if (editableGroupId === undefined) store.setSettings(patch)
-    else store.setGroupSettings(editableGroupId, patch)
+    if (editableGroupId === undefined) {
+      store.setSettings(patch)
+      return
+    }
+    if (patch.orientation !== undefined) {
+      const snapshot = store.getSnapshot()
+      const groupIds = Object.values(snapshot.placements).filter((placement) => placement.groupId === editableGroupId).map((placement) => placement.id)
+      store.setOrientation(patch.orientation, groupIds)
+      return
+    }
+    store.setGroupSettings(editableGroupId, patch)
   }, [editableGroupId, store])
   const handleSurfaceEdgeChange = useCallback((edge: SurfaceEdgeMetadata | undefined): void => {
     if (activeSurface === undefined) return
@@ -859,6 +874,13 @@ export function App({
   const handleUndo = useCallback((): void => { store.undo() }, [store])
   const handleRedo = useCallback((): void => { store.redo() }, [store])
   const handleNudge = useCallback((delta: Point2): void => { store.moveSelected(delta) }, [store])
+  const handleMoveArray = useCallback((): void => { changeTool('select') }, [changeTool])
+  const handleRotateArray = useCallback((): void => {
+    if (editableGroupId === undefined) return
+    const snapshot = store.getSnapshot()
+    const groupIds = Object.values(snapshot.placements).filter((placement) => placement.groupId === editableGroupId).map((placement) => placement.id)
+    store.rotateGroup(true, groupIds)
+  }, [editableGroupId, store])
 
   const autoFillReady = selectedPanel !== null && activeSurface !== undefined
   const handleAutoFill = useCallback((): void => {
@@ -931,6 +953,40 @@ export function App({
     ? summary
     : { ...summary, draggingCount: draggingPlacementIds.length }, [draggingPlacementIds.length, summary])
   const ghostPlacements = useMemo<readonly PanelPlacement[]>(() => [...manualGhost], [manualGhost])
+  const panelSlotOutlines = useMemo<readonly PanelSlotOutline[]>(() => {
+    if (editableGroupId === undefined || activeTool !== 'select') return []
+    const groupPlacements = placements.filter((placement) => placement.groupId === editableGroupId)
+    const first = groupPlacements[0]
+    if (first === undefined) return []
+    const panel = Object.values(definitions).find((definition) => definition.id === first.panelId)
+    const surface = surfaces.find((candidate) => candidate.id === first.surfaceId)
+    if (panel === undefined || surface === undefined) return []
+    const edge = surfaceEdges[first.surfaceId]
+    return createAdjacentPanelSlots(groupPlacements, panel, editableSettings).flatMap((input, index) => {
+      const preview = store.previewPanel(input)
+      if (preview === undefined) return []
+      return [{
+        placement: { ...preview, id: `panel-slot-${String(index)}` },
+        panel,
+        surface,
+        ...(edge === undefined ? {} : { edge }),
+      }]
+    })
+  }, [activeTool, definitions, editableGroupId, editableSettings, placements, store, surfaceEdges, surfaces])
+  const handleAddPanelSlot = useCallback((slot: PanelPlacement): void => {
+    const created = store.addPanel({
+      panelId: slot.panelId,
+      surfaceId: slot.surfaceId,
+      localCenter: slot.localCenter,
+      orientation: slot.orientation,
+      clearanceM: slot.clearanceM,
+      tiltDeg: slot.tiltDeg,
+      ...(slot.groupId === undefined ? {} : { groupId: slot.groupId }),
+    })
+    if (created?.groupId === undefined) return
+    const snapshot = store.getSnapshot()
+    store.selectPanels(Object.values(snapshot.placements).filter((placement) => placement.groupId === created.groupId).map((placement) => placement.id))
+  }, [store])
 
   const alignPreview = useMemo<AlignPreviewState | null>(() => {
     if (!placementState.align.enabled) return null
@@ -995,6 +1051,7 @@ export function App({
         draftObstacle={draftObstacle}
         draftSurfaceId={draftObstacleSurfaceId}
       />
+      <PanelSlotOutlines slots={panelSlotOutlines} onAdd={handleAddPanelSlot} />
     </PanelLayer>
   )
 
@@ -1063,6 +1120,8 @@ export function App({
       onRedo={handleRedo}
       onDelete={handleDelete}
       onNudgeSelection={handleNudge}
+      onMoveSelection={editableGroupId === undefined ? undefined : handleMoveArray}
+      onRotateSelection={editableGroupId === undefined ? undefined : handleRotateArray}
       onAutoFill={autoFillReady ? handleAutoFill : undefined}
       obstacles={activeObstacles}
       draftObstacle={draftObstacle}
