@@ -53,6 +53,11 @@ class FixtureValidatorAdversarialTests(unittest.TestCase):
     def test_checked_in_fixture_is_valid(self) -> None:
         self.assertEqual(GENERATOR.validate(self.root), GENERATOR.EXPECTED_COUNTS)
 
+    def test_missing_compressed_delivery_artifact_fails(self) -> None:
+        (self.root / "synthetic-webodm-house.obj.gz").unlink()
+        with self.assertRaises(FileNotFoundError):
+            GENERATOR.validate(self.root)
+
     def test_missing_map_kd_fails(self) -> None:
         mtl_path = self._copy_for_write("synthetic-webodm-house.mtl")
         mtl = mtl_path.read_text(encoding="utf-8")

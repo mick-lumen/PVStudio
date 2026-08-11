@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import gzip
 import hashlib
 import math
 import random
@@ -36,6 +37,7 @@ from pathlib import Path, PurePosixPath
 ROOT = Path(__file__).resolve().parents[1]
 OUTPUT = ROOT / "public" / "test-data" / "synthetic-webodm-house"
 OBJ_PATH = OUTPUT / "synthetic-webodm-house.obj"
+COMPRESSED_OBJ_PATH = OUTPUT / "synthetic-webodm-house.obj.gz"
 MTL_PATH = OUTPUT / "synthetic-webodm-house.mtl"
 TEXTURES = (OUTPUT / "ground-texture.jpg", OUTPUT / "roof-texture.jpg", OUTPUT / "wall-texture.jpg")
 
@@ -69,6 +71,7 @@ EXPECTED_GROUP_MATERIALS = {
 # a plausible marker stream but corrupted entropy bytes cannot pass validation.
 EXPECTED_ARTIFACT_SHA256 = {
     "synthetic-webodm-house.obj": "3934211d4e983dd855c6458e99dbaf3f7b2283510de1b469117598f050cfd196",
+    "synthetic-webodm-house.obj.gz": "8748e229de9a12bcfbd7a8d17edaa8cc2950c7c8ee1d69f64408f6f84835a628",
     "synthetic-webodm-house.mtl": "767005ac4294e70aee9e32306280d0d1c5fc11d09af46d6f22798ab017fddf5b",
     "ground-texture.jpg": "7ab85a4c63794f3e2bfb1aa3c4552a90b788eb2a241ee6f9829b5cf0073eb96f",
     "roof-texture.jpg": "59e76a17281ffe0b274ade53b343c3012b77434317d9d3e044bfc6e212d8764b",
@@ -338,6 +341,9 @@ def write_texture(path: Path, colour: tuple[int, int, int], seed: int) -> None:
 def generate() -> tuple[int, int, int, int]:
     surfaces = build_surfaces()
     stats = write_obj(surfaces)
+    # mtime=0 makes the browser-delivery artifact reproducible across machines
+    # and ensures its canonical hash changes only when the OBJ bytes change.
+    COMPRESSED_OBJ_PATH.write_bytes(gzip.compress(OBJ_PATH.read_bytes(), compresslevel=9, mtime=0))
     write_texture(TEXTURES[0], (99, 121, 66), 11)
     write_texture(TEXTURES[1], (79, 95, 112), 22)
     write_texture(TEXTURES[2], (173, 143, 103), 33)
@@ -660,8 +666,9 @@ def validate(root: Path = OUTPUT) -> tuple[int, int, int, int]:
     """
 
     obj_path, mtl_path, texture_paths = fixture_paths(root)
-    if not obj_path.is_file() or not mtl_path.is_file():
-        raise FileNotFoundError("OBJ/MTL fixture is missing; run the generator first")
+    compressed_obj_path = root / COMPRESSED_OBJ_PATH.name
+    if not obj_path.is_file() or not compressed_obj_path.is_file() or not mtl_path.is_file():
+        raise FileNotFoundError("OBJ/compressed OBJ/MTL fixture is missing; run the generator first")
     obj_bytes = obj_path.stat().st_size
     if obj_bytes < 50_000_000:
         raise ValueError(f"OBJ is {obj_bytes} bytes; expected at least 50,000,000 bytes")
@@ -787,6 +794,7 @@ def validate(root: Path = OUTPUT) -> tuple[int, int, int, int]:
         _validate_artifact_hash(texture, EXPECTED_ARTIFACT_SHA256[texture.name])
     _validate_artifact_hash(mtl_path, EXPECTED_ARTIFACT_SHA256[mtl_path.name])
     _validate_artifact_hash(obj_path, EXPECTED_ARTIFACT_SHA256[obj_path.name])
+    _validate_artifact_hash(compressed_obj_path, EXPECTED_ARTIFACT_SHA256[compressed_obj_path.name])
     return counts
 
 
@@ -797,7 +805,8 @@ def main() -> None:
     stats = validate() if args.validate else generate()
     print(
         f"synthetic WebODM fixture: vertices={stats[0]} texcoords={stats[1]} "
-        f"normals={stats[2]} triangles={stats[3]} obj_bytes={OBJ_PATH.stat().st_size}"
+        f"normals={stats[2]} triangles={stats[3]} obj_bytes={OBJ_PATH.stat().st_size} "
+        f"compressed_obj_bytes={COMPRESSED_OBJ_PATH.stat().st_size}"
     )
 
 

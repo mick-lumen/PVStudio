@@ -32,6 +32,13 @@ describe('viewer resource mapping and model loading', () => {
     expect(new TextDecoder().decode(result)).toBe('v 0 0 0\nf 1 1 1\n')
   })
 
+  it('rejects an empty or HTML fallback document instead of publishing a loaded zero-geometry model', async () => {
+    await expect(loadViewerModel({
+      name: 'Missing deployment asset',
+      obj: '# <!doctype html> fallback from the static host\n',
+    })).rejects.toThrow('OBJ contains no renderable triangle geometry')
+  })
+
   it('detects WebODM Z-up bounds while preserving conventional and ambiguous Y-up models', () => {
     const webOdmBounds = { min: { x: -50, y: -45, z: -24 }, max: { x: 65, y: 55, z: -8 } }
     const conventionalBounds = { min: { x: -20, y: 0, z: -15 }, max: { x: 20, y: 8, z: 15 } }

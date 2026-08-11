@@ -1075,6 +1075,14 @@ export async function loadViewerModel(source: ViewerModelSource, options: Viewer
     if (options.signal?.aborted) throw new DOMException('Model loading was cancelled', 'AbortError')
     report('parsing', 0.62, 1, 1, resourceName(source.obj, 'model.obj'))
     const parsed = await parseObjOffThread(inlineObj ?? objBytes ?? new ArrayBuffer(0), options.signal)
+    const parsedCounts = sourceCountsForParsed(parsed)
+    const renderableTriangleCount = parsed.groups.reduce(
+      (count, group) => count + Math.floor(group.indices.length / 3),
+      0,
+    )
+    if (parsedCounts.vertexCount < 3 || parsedCounts.polygonCount < 1 || renderableTriangleCount < 1) {
+      throw new Error('OBJ contains no renderable triangle geometry')
+    }
     const object = buildViewerObject(parsed, materials, source.name ?? resourceName(source.obj, 'Site model'))
     builtObject = object
     const resolvedUpAxis = resolveViewerModelUpAxis(source.upAxis, parsed.referencedBounds ?? parsed.bounds)

@@ -9,6 +9,10 @@ repeatable and redistributable:
   triangular polygons, seven explicit normals, and UV coordinates. The file is
   above the 50,000,000-byte / 500,000-triangle large-model acceptance target
   while remaining below GitHub's 100 MiB per-file limit.
+- `synthetic-webodm-house.obj.gz` — 11,706,029-byte deterministic gzip delivery
+  artifact used by the public sample flow. It expands byte-for-byte to the OBJ
+  above and is tracked so a clean checkout exercises the same model as a local
+  workspace.
 - `synthetic-webodm-house.mtl` — `Ground`, `Roof`, and `Wall` material groups
   linked to local JPEG maps.
 - `ground-texture.jpg`, `roof-texture.jpg`, `wall-texture.jpg` — valid 512 ×
@@ -45,11 +49,11 @@ python3 scripts/generate-webodm-sample.py
 python3 scripts/generate-webodm-sample.py --validate
 ```
 
-Validation checks canonical SHA-256 hashes for the checked-in OBJ, MTL, and all
-three JPEG maps in addition to the exact file-size floor (50,000,000 bytes),
-polygon floor (500,000), OBJ-to-MTL link, required material groups, and complete JPEG
-marker/scan structure with dimensions. This catches byte-level texture
-corruption even when a damaged JPEG still has an EOI marker.
+Validation checks canonical SHA-256 hashes for the checked-in OBJ, compressed
+OBJ, MTL, and all three JPEG maps in addition to the exact file-size floor
+(50,000,000 bytes), polygon floor (500,000), OBJ-to-MTL link, required material
+groups, and complete JPEG marker/scan structure with dimensions. This catches
+byte-level texture corruption even when a damaged JPEG still has an EOI marker.
 
 The adversarial regression suite can be run with:
 

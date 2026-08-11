@@ -33,6 +33,7 @@ jobs:
           npm test -- --run
           npm run typecheck
           npm run lint
+          python3 scripts/generate-webodm-sample.py --validate
 
       - name: Run production browser flows
         run: npm run e2e
