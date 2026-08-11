@@ -76,10 +76,24 @@ async function waitForPanelCount(page: Page, count: number): Promise<void> {
   await expect(status(page)).toHaveText(expression, { timeout: ACTION_TIMEOUT })
 }
 
+async function projectMetric(page: Page, label: string): Promise<string> {
+  const card = page.getByRole('heading', { name: 'Array status', exact: true }).locator('..').locator('..')
+  return (await card.locator('dt', { hasText: label }).locator('..').locator('dd').textContent())?.trim() ?? ''
+}
+
+async function commitNumberSetting(page: Page, label: string, value: string): Promise<void> {
+  const input = page.getByLabel(label)
+  await input.fill(value)
+  await input.blur()
+  await expect(input).toHaveValue(value)
+}
+
 async function placePanelPair(page: Page): Promise<void> {
+  await page.getByRole('group', { name: 'Camera mode' }).getByRole('button', { name: '2D plan', exact: true }).click()
+  await expect(page.getByRole('group', { name: 'Camera mode' }).getByRole('button', { name: '2D plan', exact: true })).toHaveAttribute('aria-pressed', 'true')
   await armPanel(page)
   await chooseInspector(page)
-  await clickCanvas(page, 0.50, 0.64)
+  await clickCanvas(page, 0.46, 0.68)
   await waitForPanelCount(page, 1)
 
   // Arm the same catalogue module again and use a nearby, non-overlapping
@@ -87,14 +101,14 @@ async function placePanelPair(page: Page): Promise<void> {
   // selection-box and alignment behavior deterministic.
   await armPanel(page)
   await chooseInspector(page)
-  await clickCanvas(page, 0.58, 0.64)
+  await clickCanvas(page, 0.54, 0.68)
   await waitForPanelCount(page, 2)
 }
 
 async function selectGroundPair(page: Page): Promise<void> {
   // The box starts and ends on the visible ground face, enclosing both
   // placements while avoiding the roof ridge and the side-panel overlay.
-  await dragCanvas(page, { xRatio: 0.38, yRatio: 0.54 }, { xRatio: 0.70, yRatio: 0.74 }, 10)
+  await dragCanvas(page, { xRatio: 0.40, yRatio: 0.62 }, { xRatio: 0.60, yRatio: 0.75 }, 10)
   await expect(status(page)).toHaveText(/Panel layout: 2 panels · 2 selected(?: ·|$)/, { timeout: ACTION_TIMEOUT })
 }
 
@@ -337,7 +351,7 @@ test.describe('PV Studio production-browser workflow', () => {
 
     // Drag from the first module's projected center. PanelBatch should keep
     // the complete selection together while preserving selection state.
-    await dragCanvas(page, { xRatio: 0.50, yRatio: 0.64 }, { xRatio: 0.54, yRatio: 0.66 }, 8)
+    await dragCanvas(page, { xRatio: 0.46, yRatio: 0.68 }, { xRatio: 0.50, yRatio: 0.72 }, 8)
     await expect(status(page)).toHaveText(/Panel layout: 2 panels · 2 selected(?: ·|$)/, { timeout: ACTION_TIMEOUT })
   })
 
@@ -356,5 +370,99 @@ test.describe('PV Studio production-browser workflow', () => {
     await apply.click()
     await expect(page.getByRole('dialog', { name: /Align preview|Confirm alignment/ })).toBeHidden({ timeout: ACTION_TIMEOUT })
     await expect(status(page)).toHaveText(/Panel layout: 2 panels · 2 selected(?: ·|$)/, { timeout: ACTION_TIMEOUT })
+  })
+
+  test('completes the OpenSolar-style array editing journey without disappearing panels or pointer errors', async ({ page }) => {
+    const browserErrors: string[] = []
+    page.on('pageerror', (error) => { browserErrors.push(error.message) })
+    await waitForViewer(page)
+    await expect(page.locator('.surface-chip')).toHaveText(/Ground plane\s*· 520\.0 m²/)
+
+    const arrays = page.locator('.array-list button')
+    await armPanel(page)
+    await chooseInspector(page)
+    await clickCanvas(page, 0.50, 0.64)
+    await waitForPanelCount(page, 1)
+    await expect(arrays).toHaveCount(1)
+
+    // A compact array on an otherwise empty plane must duplicate, and the
+    // selected copy must support the standard Delete key.
+    await page.getByRole('button', { name: 'Duplicate', exact: true }).click()
+    await waitForPanelCount(page, 2)
+    await expect(arrays).toHaveCount(2)
+    await page.keyboard.press('Delete')
+    await waitForPanelCount(page, 1)
+    await expect(arrays).toHaveCount(1)
+
+    await armPanel(page)
+    await chooseInspector(page)
+    await dragCanvas(page, { xRatio: 0.38, yRatio: 0.56 }, { xRatio: 0.68, yRatio: 0.60 }, 10)
+    await waitForPanelCount(page, 57)
+    await expect(arrays).toHaveCount(2)
+    await expect(arrays.nth(1)).toContainText('56 panels')
+
+    await armPanel(page)
+    await chooseInspector(page)
+    await clickCanvas(page, 0.45, 0.52)
+    await waitForPanelCount(page, 58)
+    await expect(arrays).toHaveCount(3)
+    await expect.poll(async () => projectMetric(page, 'Project panels')).toBe('58')
+    await expect.poll(async () => projectMetric(page, 'Arrays')).toBe('3')
+    await expect(arrays.nth(0)).toContainText('1 panels')
+    await expect(arrays.nth(1)).toContainText('56 panels')
+    await expect(arrays.nth(2)).toContainText('1 panels')
+
+    // Edit the isolated third array so every control can be exercised without
+    // altering or colliding with the 56-module reference array.
+    await arrays.nth(2).click()
+    const model = page.getByLabel('Panel model for selected array')
+    const initialModel = await model.inputValue()
+    await model.selectOption({ index: 1 })
+    await expect(model).not.toHaveValue(initialModel)
+    await page.getByLabel('Panel orientation').selectOption('landscape')
+    await expect(page.getByLabel('Panel orientation')).toHaveValue('landscape')
+    await commitNumberSetting(page, 'Array azimuth in degrees', '12')
+    await commitNumberSetting(page, 'Panel tilt in degrees', '8')
+    await commitNumberSetting(page, 'Panel clearance in metres', '0.15')
+
+    await page.getByRole('tab', { name: 'Advanced', exact: true }).click()
+    await commitNumberSetting(page, 'Horizontal module spacing in metres', '0.04')
+    await commitNumberSetting(page, 'Vertical module spacing in metres', '0.08')
+    await commitNumberSetting(page, 'Modules per row', '1')
+    await commitNumberSetting(page, 'Modules per column', '1')
+    await commitNumberSetting(page, 'Horizontal group spacing in metres', '0.20')
+    await commitNumberSetting(page, 'Vertical group spacing in metres', '0.25')
+    await commitNumberSetting(page, 'Edge setback in metres', '0.30')
+    await commitNumberSetting(page, 'Row offset in metres', '0.10')
+    await commitNumberSetting(page, 'Obstacle clearance in metres', '0.20')
+
+    await page.getByRole('button', { name: 'Rotate 90°', exact: true }).click()
+    await expect(page.getByRole('button', { name: 'Undo last action', exact: true })).toBeEnabled()
+    await page.getByRole('button', { name: 'Move array', exact: true }).click()
+    await page.keyboard.press('ArrowRight')
+    await expect(status(page)).toHaveText(/Panel layout: 58 panels · 1 selected(?: ·|$)/, { timeout: ACTION_TIMEOUT })
+
+    // Context deletion must work on an unobscured visible member of the large
+    // array, even while a different array is selected.
+    const visibleArrayPanel = await canvasPoint(page, 0.58, 0.62)
+    await page.mouse.click(visibleArrayPanel.x, visibleArrayPanel.y, { button: 'right' })
+    await expect(page.getByRole('menu', { name: 'Panel actions' })).toBeVisible({ timeout: ACTION_TIMEOUT })
+    await page.getByRole('menuitem', { name: 'Delete panel', exact: true }).click()
+    await waitForPanelCount(page, 57)
+    await expect(arrays).toHaveCount(3)
+    await expect(arrays.nth(1)).toContainText('55 panels')
+
+    // Wait through multiple render frames: counts and arrays must remain
+    // stable, with no snap-back, disappearance, or raycast exception.
+    await page.waitForTimeout(750)
+    await expect.poll(async () => projectMetric(page, 'Project panels')).toBe('57')
+    await expect.poll(async () => projectMetric(page, 'Arrays')).toBe('3')
+    await expect(status(page)).toHaveText(/Panel layout: 57 panels/)
+    expect(browserErrors).toEqual([])
+
+    await test.info().attach('opensolar-style-acceptance.png', {
+      body: await page.screenshot({ fullPage: true }),
+      contentType: 'image/png',
+    })
   })
 })

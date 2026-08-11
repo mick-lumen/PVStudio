@@ -27,6 +27,7 @@ vi.mock('./viewer', () => {
   type LayerProps = {
     readonly placements?: readonly PanelPlacement[]
     readonly interactionsEnabled?: boolean
+    readonly onPanelSelect?: (placement: PanelPlacement, info: PanelPointerInfo) => void
     readonly onPanelDragStart?: (placement: PanelPlacement, info: PanelPointerInfo) => void
     readonly onPanelDrag?: (placement: PanelPlacement, info: PanelPointerInfo) => void
     readonly onPanelDragEnd?: (placement: PanelPlacement, info: PanelPointerInfo) => void
@@ -79,6 +80,7 @@ vi.mock('./viewer', () => {
       <output data-testid="mock-source">{props.source?.name ?? ''}{props.source?.mtl === undefined ? '' : `|${resourceLabel(props.source.mtl)}`}{props.source?.textures === undefined ? '' : `|${props.source.textures.map(resourceLabel).join(',')}`}</output>
       <output data-testid="mock-placement-ids">{layer?.props.placements?.map((placement) => placement.id).join(',') ?? ''}</output>
       <output data-testid="mock-placement-centers">{layer?.props.placements?.map((placement) => `${placement.id}:${placement.localCenter.x.toFixed(2)},${placement.localCenter.y.toFixed(2)}`).join('|') ?? ''}</output>
+      <output data-testid="mock-placement-groups">{layer?.props.placements?.map((placement) => placement.groupId ?? 'none').join(',') ?? ''}</output>
       <output data-testid="mock-panel-interactions">{layer?.props.interactionsEnabled === false ? 'disabled' : 'enabled'}</output>
       <output data-testid="mock-surface-gesture">{props.surfaceGestureActive ? 'active' : 'idle'}</output>
       <button
@@ -169,6 +171,7 @@ vi.mock('./viewer', () => {
       <button type="button" onClick={() => {
         const placement = layer?.props.placements?.[0]
         if (placement === undefined || layer === null) return
+        layer.props.onPanelSelect?.(placement, dragInfo(4, 2))
         layer.props.onPanelDragStart?.(placement, dragInfo(4, 2))
         layer.props.onPanelDrag?.(placement, dragInfo(4.5, 2.2))
         layer.props.onPanelDragEnd?.(placement, dragInfo(4.5, 2.2))
@@ -430,6 +433,30 @@ describe('App', () => {
       expect(screen.getByText(/Panel layout: 1 panel/)).toBeInTheDocument()
     })
     expect(screen.getByText(/Panel layout: 1 panel/)).toHaveTextContent(/0\.56 kWp|0\.55 kWp|0\.54 kWp/)
+  })
+
+  it('starts a new explicit array for every primary + Panel placement', async () => {
+    render(<App webglAvailable />)
+    fireEvent.click(screen.getByRole('button', { name: '+ Panel' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Select roof surface' }))
+    fireEvent.click(screen.getByRole('button', { name: '+ Panel' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Place second panel' }))
+    fireEvent.click(screen.getByRole('tab', { name: 'Inspector' }))
+
+    await waitFor(() => {
+      expect(screen.getByText(/Panel layout: 2 panels/)).toBeInTheDocument()
+      expect(screen.getByRole('heading', { name: 'Panel arrays' }).parentElement).toHaveTextContent('2')
+    })
+
+    const groupIds = screen.getByTestId('mock-placement-groups').textContent.split(',')
+    expect(groupIds).toHaveLength(2)
+    expect(new Set(groupIds).size).toBe(2)
+    const arraySection = screen.getByRole('heading', { name: 'Panel arrays' }).closest('section')
+    expect(arraySection).not.toBeNull()
+    expect(within(arraySection as HTMLElement).getAllByRole('button').map((button) => button.textContent)).toEqual([
+      'Array 11 panels',
+      'Array 21 panels',
+    ])
   })
 
   it('keeps a saved custom panel unique while registering and placing its wattage', async () => {

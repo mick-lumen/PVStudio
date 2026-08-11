@@ -14,8 +14,8 @@ describe('PanelSlotOutlines', () => {
   it('renders one interactive outline per candidate', () => {
     const onAdd = vi.fn()
     const { container } = render(<PanelSlotOutlines slots={[{ placement, panel, surface }]} onAdd={onAdd} />)
-    const slot = container.querySelectorAll('group').item(1)
-    expect(slot).not.toBeNull()
+    const slot = container.querySelector('mesh[name="pv-panel-slot-hit-target"]')
+    if (slot === null) throw new Error('Panel slot hit target did not render')
     fireEvent.pointerDown(slot, { button: 0 })
     expect(onAdd).toHaveBeenCalledWith(placement)
   })

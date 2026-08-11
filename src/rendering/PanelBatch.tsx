@@ -30,6 +30,7 @@ import {
   getSharedPanelMaterialSet,
 } from './materials'
 import { composePanelLocalMatrix } from './math'
+import { isPrimaryPanelPointer } from './panelPointer'
 import type { PanelLayerInteractionProps, PanelPointerInfo } from './types'
 
 export interface PanelBatchProps extends PanelLayerInteractionProps {
@@ -63,6 +64,20 @@ const SHARED_GEOMETRY: PanelGeometry = Object.freeze({
 
 /** Typed no-op raycast used while another scene tool owns pointer input. */
 export const NO_PANEL_RAYCAST: THREE.Mesh['raycast'] = (): void => {}
+
+/**
+ * Keep an explicit callable raycast on interactive instanced meshes. React
+ * Three Fiber resets a removed constructor-backed prop to `0`, so switching
+ * directly from the inert raycast to event handlers would otherwise leave a
+ * numeric `raycast` value and break the entire pointer event pass.
+ */
+export const PANEL_RAYCAST: THREE.InstancedMesh['raycast'] = function panelRaycast(
+  this: THREE.InstancedMesh,
+  raycaster,
+  intersects,
+): void {
+  THREE.InstancedMesh.prototype.raycast.call(this, raycaster, intersects)
+}
 
 /** Cell details are visual-only and must never become pointer targets. */
 export const PANEL_CELL_INTERACTION_PROPS: Readonly<{ readonly raycast: THREE.Mesh['raycast'] }> = Object.freeze({
@@ -425,6 +440,10 @@ export const PanelBatch = forwardRef(function PanelBatch(
 
   const handlePointerDown = useCallback((event: ThreeEvent<PointerEvent>, items: readonly PanelRenderItem[], barsPerPanel = 1) => {
     if (!interactionsEnabled) return
+    // Preserve the browser's secondary-button context-menu sequence. Treating
+    // it as a drag here suppresses `contextmenu`, selects the wrong array, and
+    // can commit an unintended move when the button is released.
+    if (!isPrimaryPanelPointer(event.nativeEvent.button)) return
     const resolved = itemForEvent(event, items, barsPerPanel)
     if (resolved === undefined || !resolved.item.interactive) return
     // R3F's stopPropagation only affects its synthetic intersection walk.
@@ -506,6 +525,7 @@ export const PanelBatch = forwardRef(function PanelBatch(
     const stateInteractionsEnabled = interactionsEnabled && (state !== 'ghost' || stateHasInteractiveItems)
     return {
       panel: stateInteractionsEnabled ? {
+        raycast: PANEL_RAYCAST,
         onPointerDown: (event: ThreeEvent<PointerEvent>): void => { handlePointerDown(event, items) },
         onPointerMove: (event: ThreeEvent<PointerEvent>): void => { handlePointerMove(event) },
         onPointerUp: (event: ThreeEvent<PointerEvent>): void => { finishDrag(event) },

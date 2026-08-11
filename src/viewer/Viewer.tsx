@@ -43,6 +43,10 @@ import type {
 } from './types'
 import type { LoadedViewerModel } from './internalTypes'
 
+class SurfacePickerObject extends THREE.Object3D {
+  public hitObject: THREE.Object3D | null = null
+}
+
 // A full panel footprint is larger than this. Keeping sub-square-metre
 // photogrammetry shards visible but out of the interactive index prevents a
 // noisy survey mesh from publishing tens of thousands of unusable patches.
@@ -379,17 +383,22 @@ function ViewerScene({ model, progress, cameraMode, renderMode, surfaceInteracti
     .invert(), [normalised.position, normalised.scale])
 
   const surfacePicker = useMemo(() => {
-    const picker = new THREE.Object3D()
+    const picker = new SurfacePickerObject()
     if (model.index === null) return picker
     picker.raycast = (raycaster: THREE.Raycaster, intersections: THREE.Intersection[]): void => {
       const rawOrigin = raycaster.ray.origin.clone().applyMatrix4(inverseNormalisation)
       const rawDirection = raycaster.ray.direction.clone().transformDirection(inverseNormalisation).normalize()
       const hit = model.index?.raycastRawRay(new THREE.Ray(rawOrigin, rawDirection))
       if (hit === undefined || hit === null) return
+      picker.hitObject = hit.mesh
       const displayPoint = hit.point.clone().applyMatrix4(inverseNormalisation.clone().invert())
       const distance = displayPoint.distanceTo(raycaster.ray.origin)
       if (!Number.isFinite(distance)) return
-      intersections.push({ distance, point: displayPoint, object: hit.mesh, faceIndex: hit.faceIndex })
+      // The picker must own the intersection so R3F dispatches directly to
+      // its handlers. The packed index's real mesh stays alongside it for
+      // logical-surface resolution without making the whole scene an
+      // interactive recursive raycast root.
+      intersections.push({ distance, point: displayPoint, object: picker, faceIndex: hit.faceIndex })
     }
     return picker
   }, [inverseNormalisation, model.index])
@@ -634,7 +643,8 @@ function ViewerScene({ model, progress, cameraMode, renderMode, surfaceInteracti
 
   const notifySurfacePointer = useCallback((phase: ViewerSurfacePointerPhase, event: ThreeEvent<PointerEvent>): ViewerSurfaceHit | null => {
     const point = toViewerSurfaceModelPoint(event.point, normalised.position, normalised.scale)
-    const hit = selectViewerSurface(model.index, { object: event.object, faceIndex: event.faceIndex ?? undefined, point })
+    const hitObject = event.object === surfacePicker ? surfacePicker.hitObject ?? event.object : event.object
+    const hit = selectViewerSurface(model.index, { object: hitObject, faceIndex: event.faceIndex ?? undefined, point })
     const native = event.nativeEvent
     onSurfacePointer({
       phase,
@@ -649,7 +659,7 @@ function ViewerScene({ model, progress, cameraMode, renderMode, surfaceInteracti
       selection: hit?.selection ?? null,
     })
     return hit
-  }, [model.index, normalised.position, normalised.scale, onSurfacePointer])
+  }, [model.index, normalised.position, normalised.scale, onSurfacePointer, surfacePicker])
 
   const handlePointerMove = useCallback((event: ThreeEvent<PointerEvent>) => {
     if (nativeSurfacePointersRef.current.has(event.nativeEvent.pointerId)) return
@@ -728,8 +738,17 @@ function ViewerScene({ model, progress, cameraMode, renderMode, surfaceInteracti
       <ambientLight intensity={1.55} />
       <directionalLight position={[6, 12, 8]} intensity={2.2} castShadow={shadows} />
       <color attach="background" args={['#edf1f0']} />
-      <group position={normalised.position.toArray()} scale={normalised.scale} onPointerMove={handlePointerMove} onPointerDown={handlePointerDown} onPointerUp={handlePointerUp} onPointerCancel={handlePointerCancel} onPointerMissed={onSurfaceMiss}>
-        {model.index !== null && <primitive object={surfacePicker} />}
+      <group position={normalised.position.toArray()} scale={normalised.scale}>
+        {model.index !== null && (
+          <primitive
+            object={surfacePicker}
+            onPointerMove={handlePointerMove}
+            onPointerDown={handlePointerDown}
+            onPointerUp={handlePointerUp}
+            onPointerCancel={handlePointerCancel}
+            onPointerMissed={onSurfaceMiss}
+          />
+        )}
         <primitive object={model.loaded.object} />
         {sceneContent}
       </group>

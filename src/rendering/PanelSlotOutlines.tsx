@@ -38,12 +38,12 @@ function PanelSlot({ slot, onAdd, onRejected }: { readonly slot: PanelSlotOutlin
     else onRejected?.(slot.reason ?? 'This panel position is invalid.')
   }
   return (
-    <group matrix={matrix} matrixAutoUpdate={false} onPointerDown={handlePointerDown}>
+    <group matrix={matrix} matrixAutoUpdate={false}>
       <mesh position={[0, height / 2, lift]} renderOrder={20}><boxGeometry args={[width + stroke, stroke, stroke]} /><meshBasicMaterial color={colour} transparent opacity={0.92} depthWrite={false} /></mesh>
       <mesh position={[0, -height / 2, lift]} renderOrder={20}><boxGeometry args={[width + stroke, stroke, stroke]} /><meshBasicMaterial color={colour} transparent opacity={0.92} depthWrite={false} /></mesh>
       <mesh position={[width / 2, 0, lift]} renderOrder={20}><boxGeometry args={[stroke, height + stroke, stroke]} /><meshBasicMaterial color={colour} transparent opacity={0.92} depthWrite={false} /></mesh>
       <mesh position={[-width / 2, 0, lift]} renderOrder={20}><boxGeometry args={[stroke, height + stroke, stroke]} /><meshBasicMaterial color={colour} transparent opacity={0.92} depthWrite={false} /></mesh>
-      <mesh position={[0, 0, lift]} renderOrder={19}>
+      <mesh name="pv-panel-slot-hit-target" position={[0, 0, lift]} renderOrder={19} onPointerDown={handlePointerDown}>
         <planeGeometry args={[width, height]} />
         <meshBasicMaterial color={colour} transparent opacity={0.001} depthWrite={false} side={THREE.DoubleSide} />
       </mesh>

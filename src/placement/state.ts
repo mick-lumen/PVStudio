@@ -1616,31 +1616,68 @@ export class PlacementStore {
     })
   }
 
-  /** Duplicate an array atomically; no partial copy is committed on failure. */
-  public duplicateArray(arrayId: unknown, delta: Point2 = { x: 0.5, y: 0.5 }): readonly PanelPlacement[] {
-    if (!validString(arrayId) || !isFinitePoint(delta)) return []
+  /**
+   * Duplicate an array atomically; no partial copy is committed on failure.
+   * Without an authored offset, try the nearest complete-footprint positions
+   * around the source instead of a fixed sub-panel nudge that would overlap.
+   */
+  public duplicateArray(arrayId: unknown, delta?: Point2): readonly PanelPlacement[] {
+    if (!validString(arrayId) || (delta !== undefined && !isFinitePoint(delta))) return []
     const source = Object.values(this.state.placements)
       .filter((placement) => (placement.groupId ?? `single:${placement.id}`) === arrayId)
     if (source.length === 0) return []
     const groupId = allocateGeneratedGroupId(this.state.placements, this.state.groupSettings, this.state.nextId)
-    const ignored = new Set<string>()
-    const created: PanelPlacement[] = []
-    let nextId = this.state.nextId
-    for (const placement of source) {
-      const allocation = allocateGeneratedId(new Set([...Object.keys(this.state.placements), ...created.map((entry) => entry.id)]), nextId)
-      nextId = allocation.nextId
-      const candidate: PanelPlacement = {
-        ...placement,
-        id: allocation.id,
-        groupId,
-        localCenter: { x: placement.localCenter.x + delta.x, y: placement.localCenter.y + delta.y },
-      }
-      if (!this.canPlace(candidate, ignored, this.settingsFor(placement.groupId))) return []
-      created.push(candidate)
-    }
-    if (!pairwiseSpacingValid(created, this.definitions, () => this.settingsFor(source[0]?.groupId),
-      (surfaceId) => this.surface(surfaceId), (surfaceId) => this.surfaceEdgeMetadata(surfaceId))) return []
     const settings = this.settingsFor(source[0]?.groupId)
+    const sourceRects = source.flatMap((placement) => {
+      const definition = this.definitions[placement.panelId]
+      return definition === undefined ? [] : [panelRect(placement, definition)]
+    })
+    if (sourceRects.length !== source.length) return []
+    const minX = Math.min(...sourceRects.map((rect) => rect.x))
+    const minY = Math.min(...sourceRects.map((rect) => rect.y))
+    const maxX = Math.max(...sourceRects.map((rect) => rect.x + rect.width))
+    const maxY = Math.max(...sourceRects.map((rect) => rect.y + rect.height))
+    const clearanceX = Math.max(settings.interPanelSpacingM, settings.horizontalGroupSpacingM ?? 0, 0.05) + GEOMETRY_EPSILON * 10
+    const clearanceY = Math.max(settings.rowSpacingM, settings.verticalGroupSpacingM ?? 0, 0.05) + GEOMETRY_EPSILON * 10
+    const stepX = maxX - minX + clearanceX
+    const stepY = maxY - minY + clearanceY
+    const offsets: readonly Point2[] = delta === undefined ? [
+      { x: stepX, y: 0 },
+      { x: -stepX, y: 0 },
+      { x: 0, y: stepY },
+      { x: 0, y: -stepY },
+      { x: stepX, y: stepY },
+      { x: -stepX, y: stepY },
+      { x: stepX, y: -stepY },
+      { x: -stepX, y: -stepY },
+    ] : [delta]
+    let created: readonly PanelPlacement[] = []
+    let nextId = this.state.nextId
+    for (const offset of offsets) {
+      const attempt: PanelPlacement[] = []
+      let attemptNextId = this.state.nextId
+      for (const placement of source) {
+        const allocation = allocateGeneratedId(new Set([...Object.keys(this.state.placements), ...attempt.map((entry) => entry.id)]), attemptNextId)
+        attemptNextId = allocation.nextId
+        const candidate: PanelPlacement = {
+          ...placement,
+          id: allocation.id,
+          groupId,
+          localCenter: { x: placement.localCenter.x + offset.x, y: placement.localCenter.y + offset.y },
+        }
+        if (!this.canPlace(candidate, new Set<string>(), settings)) {
+          attempt.length = 0
+          break
+        }
+        attempt.push(candidate)
+      }
+      if (attempt.length !== source.length || !pairwiseSpacingValid(attempt, this.definitions, () => settings,
+        (surfaceId) => this.surface(surfaceId), (surfaceId) => this.surfaceEdgeMetadata(surfaceId))) continue
+      created = attempt
+      nextId = attemptNextId
+      break
+    }
+    if (created.length === 0) return []
     const changed = this.update((state) => ({
       ...state,
       placements: { ...state.placements, ...Object.fromEntries(created.map((placement) => [placement.id, placement])) },

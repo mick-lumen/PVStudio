@@ -514,15 +514,21 @@ export function App({
     const definition = toPanelDefinition(panel)
     store.registerPanel(definition)
     setSelectedPanelId(panel.id)
+    // The primary "+ Panel" action starts a new array. Extending the current
+    // array is deliberately handled by its adjacent white slot outlines; if
+    // the previous array remained selected here, every later placement would
+    // silently inherit that group and the sidebar could never represent the
+    // separate roof arrays the user intended to create.
+    store.selectPanels([])
     const surface = selectedSurfaceFor(surfaces, store.getSnapshot()) ?? surfaces[0]
     if (surface === undefined) {
       changeTool('place')
       return
     }
     store.setActiveSurface(surface.id)
-    store.beginManualPlacement({ panelId: panel.id, surfaceId: surface.id, ...(editableGroupId === undefined ? {} : { groupId: editableGroupId }) })
+    store.beginManualPlacement({ panelId: panel.id, surfaceId: surface.id })
     changeTool('place')
-  }, [changeTool, editableGroupId, store, surfaces])
+  }, [changeTool, store, surfaces])
 
   const handleSurfaceSelect = useCallback((selection: SurfaceSelection | null, event?: ViewerSurfaceSelectEvent): void => {
     if (selection === null) {
@@ -665,11 +671,12 @@ export function App({
       if (event.phase === 'move' && active === null && event.buttons === 0 && event.selection !== null) {
         const surfaceId = event.selection.surface.id
         const draft = store.getSnapshot().manualPlacement
-        if (draft === undefined || draft.panelId !== activePanel.id || draft.surfaceId !== surfaceId || draft.groupId !== editableGroupId) {
+        const placementGroupId = draft?.panelId === activePanel.id ? draft.groupId : editableGroupId
+        if (draft === undefined || draft.panelId !== activePanel.id || draft.surfaceId !== surfaceId || draft.groupId !== placementGroupId) {
           store.cancelManualPlacement()
           store.cancelArrayDrag()
           store.cancelAutoFill()
-          store.beginManualPlacement({ panelId: activePanel.id, surfaceId, ...(editableGroupId === undefined ? {} : { groupId: editableGroupId }) })
+          store.beginManualPlacement({ panelId: activePanel.id, surfaceId, ...(placementGroupId === undefined ? {} : { groupId: placementGroupId }) })
         }
         store.setActiveSurface(surfaceId)
         store.updateManualPlacement(event.selection.hitLocal, surfaceId)
@@ -677,12 +684,18 @@ export function App({
       }
       if (event.phase === 'down') {
         if (event.selection === null) return
+        // Read the group from the armed draft before cancelling it. React can
+        // deliver this pointer event before the selection-clearing render from
+        // "+ Panel" has committed, so the render-time editableGroupId may
+        // still refer to the previous array for one frame.
+        const armedDraft = store.getSnapshot().manualPlacement
+        const placementGroupId = armedDraft?.panelId === activePanel.id ? armedDraft.groupId : editableGroupId
         activeSurfaceDrag.current = {
           pointerId: event.pointerId,
           panelId: activePanel.id,
           surfaceId: event.selection.surface.id,
           startPoint: event.selection.hitLocal,
-          ...(editableGroupId === undefined ? {} : { groupId: editableGroupId }),
+          ...(placementGroupId === undefined ? {} : { groupId: placementGroupId }),
           lastPoint: event.selection.hitLocal,
           moved: false,
         }
@@ -690,7 +703,7 @@ export function App({
         store.cancelAutoFill()
         store.cancelManualPlacement()
         store.setActiveSurface(event.selection.surface.id)
-        store.beginManualPlacement({ panelId: activePanel.id, surfaceId: event.selection.surface.id, ...(editableGroupId === undefined ? {} : { groupId: editableGroupId }) })
+        store.beginManualPlacement({ panelId: activePanel.id, surfaceId: event.selection.surface.id, ...(placementGroupId === undefined ? {} : { groupId: placementGroupId }) })
         store.updateManualPlacement(event.selection.hitLocal, event.selection.surface.id)
         return
       }
@@ -794,7 +807,7 @@ export function App({
       ? [placement.id]
       : Object.values(snapshot.placements).filter((candidate) => candidate.groupId === placement.groupId).map((candidate) => candidate.id)
     if (info.shiftKey) store.selectPanels([placement.id], true)
-    else store.selectPanels(groupIds)
+    else if (!snapshot.selectedIds.includes(placement.id)) store.selectPanels(groupIds)
     store.setActiveSurface(placement.surfaceId)
   }, [store])
   const handlePanelDragStart = useCallback((placement: PanelPlacement, info: PanelPointerInfo): void => {

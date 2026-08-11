@@ -384,6 +384,29 @@ describe('PlacementStore settings, surfaces, arrays and alignment', () => {
     expect(editableGroupIdFor(store.getState())).toBeUndefined()
   })
 
+  it('duplicates an array at the nearest complete-footprint offset without overlapping its source', () => {
+    const store = makeStore()
+    const source = store.addPanel({ panelId: panel.id, surfaceId: 'roof', localCenter: { x: 5, y: 2.5 }, groupId: 'array-a' })
+    expect(source).toBeDefined()
+
+    const duplicate = store.duplicateArray('array-a')
+
+    expect(duplicate).toHaveLength(1)
+    expect(duplicate[0]?.groupId).not.toBe('array-a')
+    expect(duplicate[0]?.localCenter.x).toBeCloseTo(6.1)
+    expect(duplicate[0]?.localCenter.y).toBe(2.5)
+    expect(store.getState().selectedIds).toEqual([duplicate[0]?.id])
+    expect(store.totals().count).toBe(2)
+  })
+
+  it('keeps an explicit duplicate offset exact and rejects it atomically when it overlaps', () => {
+    const store = makeStore()
+    store.addPanel({ panelId: panel.id, surfaceId: 'roof', localCenter: { x: 5, y: 2.5 }, groupId: 'array-a' })
+
+    expect(store.duplicateArray('array-a', { x: 0.5, y: 0.5 })).toEqual([])
+    expect(store.totals().count).toBe(1)
+  })
+
   it('uses group settings when explicit auto-fill fields are supplied', () => {
     const groupSettings: PanelGroupSettings = { ...settings, interPanelSpacingM: 0.8, rowSpacingM: 0.6 }
     const store = createPlacementStore({ panels: [panel], surfaces: [surface], settings, groupSettings: { 'group-a': groupSettings } })
