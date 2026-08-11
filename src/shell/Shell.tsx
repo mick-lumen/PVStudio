@@ -173,6 +173,8 @@ export interface ShellProps {
   readonly acceptedImportTypes?: string
   readonly webglAvailable?: boolean
   readonly statusMessage?: string
+  /** Elevates import work and failures above the persistent footer status. */
+  readonly statusKind?: 'default' | 'progress' | 'error'
   readonly className?: string
 }
 
@@ -752,6 +754,7 @@ export function Shell({
   acceptedImportTypes = '.zip,.obj,.mtl,.jpg,.jpeg,.png',
   webglAvailable,
   statusMessage: externalStatusMessage,
+  statusKind = 'default',
   className = '',
 }: ShellProps): ReactNode {
   const [themeState, setThemeState] = useState<Theme>(() => getInitialTheme(initialTheme))
@@ -1060,6 +1063,23 @@ export function Shell({
 
           <div className={`viewer-frame viewer-frame--${cameraMode}${showGrid && cameraMode === '2d' ? ' viewer-frame--grid' : ''}${alignStage !== 'idle' ? ' viewer-frame--align-preview' : ''}`}>
             <div className="viewer-frame__canvas" tabIndex={0} role="region" aria-label={`${cameraMode === '3d' ? '3D' : '2D'} site viewer. Drag to orbit, scroll or pinch to zoom, and shift-drag or two-finger drag to pan. Press Enter to select a surface.`} onKeyDown={handleViewerKeyDown}><ShellErrorBoundary area="site viewer" resetKey={viewer ?? (hasWebGL ? `placeholder:${acceptedImportTypes}:${hasImportHandler ? 'ready' : 'disabled'}` : 'webgl-fallback')}>{viewerContent}</ShellErrorBoundary></div>
+            {externalStatusMessage === undefined || statusKind === 'default' ? null : (
+              <div
+                className={`viewer-import-status viewer-import-status--${statusKind}`}
+                role={statusKind === 'error' ? 'alert' : 'status'}
+                aria-label={statusKind === 'error' ? 'Import failed' : 'Preparing site model'}
+                aria-live={statusKind === 'error' ? 'assertive' : 'polite'}
+              >
+                {statusKind === 'error'
+                  ? <AlertTriangle size={20} aria-hidden="true" />
+                  : <span className="viewer-import-status__spinner" aria-hidden="true" />}
+                <span className="viewer-import-status__copy">
+                  <strong>{statusKind === 'error' ? 'Import failed' : 'Opening site model'}</strong>
+                  <span>{externalStatusMessage}</span>
+                  {statusKind === 'error' ? <small>Choose Import to try another file.</small> : <small>Large WebODM archives can take a few minutes to unpack.</small>}
+                </span>
+              </div>
+            )}
             <div className="viewer-overlay viewer-overlay--top-left"><span className="view-status"><span className="view-status__dot" aria-hidden="true" />{cameraMode === '3d' ? 'Perspective' : 'Top-down plan'}</span><span className="view-status view-status--secondary">{renderMode === 'texture' ? 'Textured' : 'Wireframe'}</span></div>
             <div className="viewer-overlay viewer-overlay--top-right viewer-navigation-hint" role="note">Drag to orbit · wheel/pinch to zoom · shift-drag/two fingers to pan</div>
             {onLoadSample !== undefined && projectName === undefined ? <div className="viewer-onboarding" role="note"><p className="eyebrow">Lightweight Demo</p><p>Demo stays in this browser. Use the <strong>Try WebODM sample</strong> action when you want to load a textured house. Nothing downloads until you choose it.</p></div> : null}

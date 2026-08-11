@@ -955,6 +955,11 @@ export function App({
     ?? (loadProgress !== null && loadProgress.phase !== 'complete' ? `${loadProgress.phase ?? 'Loading'} ${String(Math.round(loadProgress.progress * 100))}%` : undefined)
     ?? importNotice
     ?? undefined
+  const statusKind: 'default' | 'progress' | 'error' = loadError !== null
+    ? 'error'
+    : (loadProgress !== null && loadProgress.phase !== 'complete') || importNotice?.startsWith('Opening ') === true
+      ? 'progress'
+      : 'default'
   const selectedShellSurface: ShellSurface | null = activeSurface === undefined ? null : toShellSurface(activeSurface)
   const selectedShellSurfaceEdge: ShellSurfaceEdge | null = activeSurface === undefined
     ? null
@@ -1075,6 +1080,7 @@ export function App({
       acceptedImportTypes=".zip,.obj,.mtl,.jpg,.jpeg,.png"
       webglAvailable={webglAvailable}
       statusMessage={statusMessage}
+      statusKind={statusKind}
       initialCameraMode={initialCameraMode}
       initialRenderMode={initialRenderMode}
       initialShowGrid={initialShowGrid}

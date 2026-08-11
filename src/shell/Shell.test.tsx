@@ -606,6 +606,18 @@ describe('Shell', () => {
     expect(fileInput).toHaveValue('')
   })
 
+  it('shows import work and failures prominently instead of only in the footer', () => {
+    const { rerender } = render(<Shell statusMessage="Opening survey.zip…" statusKind="progress" webglAvailable={true} />)
+
+    expect(screen.getByRole('status', { name: 'Preparing site model' })).toHaveTextContent('Opening survey.zip…')
+    expect(screen.getByText('Large WebODM archives can take a few minutes to unpack.')).toBeInTheDocument()
+
+    rerender(<Shell statusMessage="Import requires one OBJ model file." statusKind="error" webglAvailable={true} />)
+
+    expect(screen.getByRole('alert', { name: 'Import failed' })).toHaveTextContent('Import requires one OBJ model file.')
+    expect(screen.getByText('Choose Import to try another file.')).toBeInTheDocument()
+  })
+
   it('validates finite clearance and tilt settings and only exposes top-down grid', () => {
     const onSettingsChange = vi.fn()
     const { container, rerender } = render(<Shell settings={settings} onSettingsChange={onSettingsChange} showGrid={true} cameraMode="3d" webglAvailable={true} />)

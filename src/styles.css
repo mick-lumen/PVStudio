@@ -102,6 +102,16 @@ a { color: inherit; }
 .viewer-frame--grid { background-image: linear-gradient(rgba(117, 147, 141, .07) 1px, transparent 1px), linear-gradient(90deg, rgba(117, 147, 141, .07) 1px, transparent 1px); background-position: center; background-size: 32px 32px; }
 .viewer-frame--align-preview::after { position: absolute; z-index: 3; inset: 0; border: 2px solid rgba(119, 126, 127, .48); border-radius: inherit; background: rgba(119, 126, 127, .08); content: ''; pointer-events: none; }
 .viewer-frame__canvas { position: absolute; inset: 0; min-height: 260px; }
+.viewer-import-status { position: absolute; z-index: 8; top: 50%; left: 50%; display: flex; width: min(440px, calc(100% - 32px)); align-items: flex-start; gap: 13px; border: 1px solid color-mix(in srgb, var(--shell-accent) 35%, var(--shell-line)); border-radius: 12px; padding: 17px 18px; background: color-mix(in srgb, var(--shell-panel-strong) 96%, transparent); color: var(--shell-text); box-shadow: 0 16px 48px rgba(20, 45, 42, .2); transform: translate(-50%, -50%); }
+.viewer-import-status--error { border-color: color-mix(in srgb, var(--shell-danger) 55%, var(--shell-line)); }
+.viewer-import-status--error > svg { flex: 0 0 auto; color: var(--shell-danger); }
+.viewer-import-status__spinner { width: 20px; height: 20px; flex: 0 0 auto; border: 2px solid color-mix(in srgb, var(--shell-accent) 25%, var(--shell-line)); border-top-color: var(--shell-accent); border-radius: 50%; animation: import-status-spin .8s linear infinite; }
+.viewer-import-status__copy { display: grid; min-width: 0; gap: 4px; }
+.viewer-import-status__copy strong { font-size: 14px; }
+.viewer-import-status__copy > span { overflow-wrap: anywhere; color: var(--shell-text); font-size: 12px; line-height: 1.45; }
+.viewer-import-status__copy small { color: var(--shell-muted); font-size: 11px; line-height: 1.4; }
+@keyframes import-status-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .viewer-import-status__spinner { animation-duration: 1.8s; } }
 .viewer-overlay { position: absolute; z-index: 4; pointer-events: none; }
 .viewer-overlay--top-left { top: 14px; left: 14px; display: flex; align-items: center; gap: 6px; }
 .viewer-overlay--top-right { top: 14px; right: 14px; }
